@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Retry the deferred app installs from the HedronOS chooser
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+
+[Timer]
+# If the machine was offline during first boot we keep trying, quietly, for a day and then
+# give up (rather than hammering a metered connection forever).
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

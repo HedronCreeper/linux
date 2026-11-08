@@ -1,0 +1,79 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/drivers.local.toml",
+  "/etc/hedron/drivers.conf"
+ ],
+ "conflicts": [
+  "mhal"
+ ],
+ "depends": [
+  "python",
+  "pciutils",
+  "kmod",
+  "hwdata",
+  "sed",
+  "grep",
+  "initramfs-utils"
+ ],
+ "dirs": [
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/initcpio",
+  "/usr/lib/initcpio/hooks",
+  "/usr/lib/initcpio/install",
+  "/usr/lib/python3.13/site-packages",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/system"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-drivers-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-drivers",
+  "/usr/bin/hedron-gpu-detect",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/driverd.py",
+  "/usr/lib/initcpio/",
+  "/usr/lib/initcpio/hooks/",
+  "/usr/lib/initcpio/hooks/hedronos-drivers",
+  "/usr/lib/initcpio/install/",
+  "/usr/lib/initcpio/install/hedronos-drivers",
+  "/usr/lib/python3.13/site-packages/hedronlib",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/system/",
+  "/usr/lib/systemd/system/hedronos-driverd.service",
+  "/usr/lib/systemd/system/hedronos-driverd.socket",
+  "/usr/lib/systemd/system/hedronos-drivers.service"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-drivers",
+ "optional": [
+  "vulkan-tools",
+  "mesa-utils",
+  "efivar",
+  "corectrl"
+ ],
+ "provides": [
+  "hedronos-graphics"
+ ],
+ "release": "1",
+ "services_enable": [
+  "hedronos-drivers.service",
+  "hedronos-driverd.socket"
+ ],
+ "size": 0,
+ "summary": "GPU detection, driver planning and one-command provisioning for HedronOS",
+ "units": [
+  "usr/lib/systemd/system/hedronos-drivers.service",
+  "usr/lib/systemd/system/hedronos-driverd.service",
+  "usr/lib/systemd/system/hedronos-driverd.socket"
+ ],
+ "version": "1.0.0"
+}

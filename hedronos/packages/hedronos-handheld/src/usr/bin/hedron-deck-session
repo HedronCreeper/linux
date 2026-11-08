@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# hedron-deck-session — the handheld session: gamescope wrapping Steam in Big Picture mode.
+#
+# Why gamescope instead of a plain compositor: it takes the panel's native mode, renders the game
+# at whatever resolution you picked, and does the scaling with a proper filter — which is how you
+# get 800p games on a 1200p panel without the compositor's blurry fallback, and how the frame
+# pacing stays under the compositor's VAAPI quirks. It also gives us a session that survives a
+# crash of the game (or of Steam) without taking your desktop with it.
+#
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+CONF=${HEDRON_DECK_CONF:-/etc/hedron/deck.conf}
+[[ -r "$CONF" ]] || { echo "hedron-deck-session: no $CONF" >&2; exit 1; }
+
+read_conf() { # read_conf <section> <key> <default>
+    local section=$1 key=$2 def=$3 val
+    val=$(awk -v s="[$section]" -v k="$key" '
+        $0 ~ /^\[/ { in_s = ($0 == s) }
+        in_s && $0 ~ "^"k"[ \t]*=" { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$CONF")
+    printf '%s' "${val:-$def}"
+}
+
+log() { printf 'hedron-deck-session: %s\n' "$*" >&2; }
+
+GAMESCOPE=$(read_conf session compositor_bin gamescope)
+command -v "$GAMESCOPE" >/dev/null 2>&1 || {
+    log "gamescope is not installed."
+    log "  install it:  sudo pacman -S gamescope"
+    log "  then re-run: hedron-deck-session"
+    log "Falling back to the regular session so you are never left with a black screen."
+    exec dbus-run-session -- "${HEDRON_FALLBACK_SESSION:-/usr/bin/hyprland}"
+}
+
+args=()
+raw=$(read_conf session args "")
+# Validate every configured flag against this exact gamescope build. Flags that the binary does
+# not know are dropped loudly — a session that dies on a typo'd flag is a bad Saturday.
+if [[ -n "$raw" ]]; then
+    help=$("$GAMESCOPE" --help 2>&1 || true)
+    for a in $raw; do
+        case "$a" in
+            -*) flag=$a; sub=${a%%=*}; sub=${sub#-}
+                if printf '%s\n' "$help" | grep -q -- "-$sub"; then
+                    args+=("$a")
+                else
+                    log "dropping unsupported gamescope flag: $a (not in this build's --help)"
+                fi ;;
+            *) args+=("$a") ;;
+        esac
+    done
+fi
+
+# The size comes from the config; add it only when it is not already in `args`, because
+# gamescope takes the last -W/-H it sees and a duplicated pair hides a typo in one of them.
+if [[ " ${args[*]:-} " != *" -W "* ]]; then
+    args+=(-W "$(read_conf session width 1280)")
+fi
+if [[ " ${args[*]:-} " != *" -H "* ]]; then
+    args+=(-H "$(read_conf session height 800)")
+fi
+
+# Battery mode: cap to 60 so the panel does not drink 4 W by itself.
+mode=$(hedron-handheld status --json 2>/dev/null | awk -F'"' '/"mode"/{print $4; exit}')
+[[ "${HEDRON_DECK_FPS:-}" ]] && args+=(-F "${HEDRON_DECK_FPS}")
+if [[ "${HEDRON_DECK_HDR:-0}" == 1 ]]; then
+    if printf '%s\n' "$help" 2>/dev/null | grep -q -- "--hdr-enabled"; then args+=(--hdr-enabled); else
+        log "this gamescope cannot enable HDR; leaving SDR"
+    fi
+fi
+
+if [[ "${HEDRON_DECK_STEAM:-1}" == 1 ]]; then
+    steam_args=$(read_conf steam args "-tenzone steamos -silent -vgui")
+    # shellcheck disable=SC2086
+    exec "$GAMESCOPE" "${args[@]}" -- env -u STEAM_RUNTIME -u STEAM_RUNTIME_PREFER_HOST_LIBRARIES \
+        WANTED_GAMEMODE=1 /usr/bin/steam $steam_args "$@"
+fi
+exec "$GAMESCOPE" "${args[@]}" -- "$@"

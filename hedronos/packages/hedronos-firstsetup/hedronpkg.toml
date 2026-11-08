@@ -1,0 +1,41 @@
+# hedronos-firstsetup — the app chooser + installer backend. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-firstsetup"
+version = "1.0.0"
+release = "1"
+summary = "HedronOS installer: app chooser (TUI + Kirigami GUI) and the disk installer behind it"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["any"]
+groups = ["hedronos"]
+
+[depends]
+runtime = ["bash", "python", "util-linux", "btrfs-progs", "sed"]
+build = []
+check = ["python"]
+optional = ["qml6", "kirigami2", "arch-install-scripts", "dosfstools", "efibootmgr", "grub"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-setup" = "0755"
+"usr/lib/hedron/hedronos-install" = "0755"
+"usr/share/hedron/setup/Setup.qml" = "0644"
+"usr/share/applications/hedron-setup.desktop" = "0644"
+"usr/share/applications/hedronos-install.desktop" = "0644"
+"etc/xdg/autostart/hedron-first-setup.desktop" = "0644"
+"usr/lib/systemd/system/hedron-setup.service" = "0644"
+"README.md" = "0644"
+
+[services]
+# Not enabled by default: see the unit file comment about getty owning tty1. The live image and
+# the desktop autostart file are the two real entry points.
+enable = []
+units = ["usr/lib/systemd/system/hedron-setup.service"]
+
+[files]
+preserve = ["/etc/xdg/autostart/hedron-first-setup.desktop"]
+
+[tests]
+modules = ["tests/test_setup_selection.py", "tests/test_installer_plan.py"]

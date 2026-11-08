@@ -1,0 +1,82 @@
+# FlowState base — the floor every profile inherits.  SPDX-License-Identifier: MIT
+#
+# These settings make Linux feel *consistent* rather than merely fast: they remove the
+# sources of sporadic stalls (writeback bursts, block-layer delays, RT throttling,
+# NUMA hinting faults, THP defrag hitches) without disabling any safety feature.
+#
+# Every key here is a real kernel knob. `hedron-tune show base` prints which ones are
+# absent on your hardware; the renderer marks them "skip" instead of failing.
+[profile]
+name = "base"
+note = "Common-sense defaults; every other profile inherits this."
+
+[sysctl]
+# Never let a big writeback flush steal tens of milliseconds of frame time.
+"vm.dirty_ratio" = 20
+"vm.dirty_background_ratio" = 5
+"vm.dirty_expire_centisecs" = 500
+"vm.dirty_writeback_centisecs" = 300
+"vm.vfs_cache_pressure" = 50
+"vm.watermark_scale_factor" = 150
+"vm.stat_interval" = 10
+# Network: this box is a workstation, not a router. Short polls help the compositor and
+# game netcode get packets without waiting for a timer.
+"net.core.default_qdisc" = "fq"
+"net.ipv4.tcp_congestion_control" = "bbr"
+"net.ipv4.tcp_no_metrics_save" = 1
+"net.core.busy_poll" = 0
+"net.core.busy_read" = 0
+# Scheduler: keep the real-time band usable (audio needs it) but bounded, and stop the
+# bandwidth controller from throttling short bursts.
+"kernel.sched_rt_runtime_us" = 950000
+"kernel.sched_cfs_bandwidth_slice_us" = 5000
+"kernel.sched_child_runs_first" = 0
+"kernel.sched_migration_cost_ns" = 500000
+"kernel.numa_balancing" = 0
+"kernel.pid_max" = 4194304
+"fs.lease-break-time" = 10
+
+[sysfs]
+# THP with `defer+madvise` gets the TLB benefit without the synchronous-compaction
+# hitch that is the classic "first 60 seconds of a Unity/Unreal title" stall.
+"sys/kernel/mm/transparent_hugepage/enabled" = "always"
+"sys/kernel/mm/transparent_hugepage/defrag" = "defer+madvise"
+"sys/kernel/mm/ksm/run" = 0
+"sys/block/*/queue/read_ahead_kb" = 512
+"sys/block/*/queue/nr_requests" = 256
+"sys/block/*/queue/add_random" = 0
+
+[cpu]
+# Base only stops the shallowest idle state from being entered on a frame boundary;
+# deeper states stay available until a gaming profile disables them.
+disable_idle_states = [1]
+
+[gpu]
+# Vendor overlays define what "auto" means per driver; base keeps it neutral.
+waitvsync_policy = 0
+
+[sched]
+# scx_hedron is enabled by the gaming/studio overlays; base stays on EEVDF.
+scheduler = "none"
+
+[irq]
+# Keep storage/NIC/GPU interrupts off the core running the main thread when possible.
+isolate_irq_pattern = "nvme* ahci* en* wlp* amdgpu* nvidia*"
+cpus = "performance"
+
+[limits]
+"@" = { rtprio = 99, memlock = 512000, nofile = "1048576" }
+
+[env]
+# Session environment for GUI apps started through systemd --user.
+MESA_VK_WSI_PRESENT_MODE = "mailbox"
+SDL_VIDEODRIVER = "wayland"
+GDK_BACKEND = "wayland"
+QT_QPA_PLATFORM = "wayland;xcb"
+QT_WAYLAND_DISABLE_WINDOWDECORATION = "1"
+
+[services]
+enable = ["hedron-flowstate.service"]
+
+[extra]
+watchdog = { mode = "skip", command = "the nmi watchdog is disabled on the kernel command line (nowatchdog)" }

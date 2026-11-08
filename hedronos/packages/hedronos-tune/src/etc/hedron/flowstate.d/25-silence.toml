@@ -1,0 +1,29 @@
+# FlowState: silence — fan noise first, e.g. a call while a download runs.
+# SPDX-License-Identifier: MIT
+[profile]
+name = "silence"
+inherits = "balanced"
+note = "Caps sustained power so the fans stay inaudible; latency is sacrificed on purpose."
+
+[cpu]
+governor = "powersave"
+energy_performance_preference = "balance_power"
+boost = false
+
+[sysctl]
+"vm.dirty_expire_centisecs" = 2000
+"kernel.sched_cfs_bandwidth_slice_us" = 3000
+
+[gpu]
+power_profile = "battery"
+power_cap = "70%"
+
+[sysfs]
+"sys/class/hwmon/hwmon*/pwm1_enable" = 1
+"sys/devices/system/cpu/cpu*/cpuidle/state1/disable" = "0"
+
+[sched]
+scheduler = "none"
+
+[extra]
+fan_curve = "hedron-fan curve set quiet || true"

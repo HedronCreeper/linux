@@ -1,0 +1,29 @@
+# Snapshot before an upgrade that could break the machine, and re-run the graphics plan
+# afterwards if the kernel or a driver package was involved. Both are hedron-rollback's and
+# hedron-drivers' own logic — this file only decides *when*.
+# SPDX-License-Identifier: MIT
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = linux*
+Target = nvidia*
+Target = mesa
+Target = lib32-mesa
+Target = vulkan-*
+Target = lib32-vulkan-*
+Target = hedronos-drivers
+Target = hedronos-tune
+
+[Action]
+Description = HedronOS: snapshotting state and re-planning graphics
+When = PreTransaction
+NeedsTarget = yes
+Exec = /usr/bin/python3 /usr/lib/hedron/hedron-rollback.py snapshot --reason "pre-transaction"
+
+[Action]
+Description = HedronOS: re-applying the GPU plan for the new kernel
+When = PostTransaction
+NeedsTarget = yes
+Exec = /usr/bin/sh -c 'test -f /var/lib/hedron/drivers/state.json && systemctl restart hedronos-drivers.service || true'

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=HedronOS Gamescope Session
+Comment=Vulkan/Wayland session composited by gamescope: HDR, integer scaling, frametime limiting
+Exec=/usr/bin/hedron-session start deck
+Type=Application
+DesktopNames=HedronOS-Gamescope
+X-VTAutoNum=1

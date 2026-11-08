@@ -1,0 +1,56 @@
+#!/bin/sh
+# Suspend/resume hook for handhelds. SPDX-License-Identifier: MIT
+#
+# Three jobs, all cheap, all things that hurt when forgotten: stop the replay ring before the
+# disk suspends (a write into a suspended block device is a lovely way to lose a segment), park
+# the TDP cap so resume does not come back at 28 W on battery, and re-assert the panel
+# brightness some firmware drops to 0 across S3.
+#
+# pre = about to suspend, post = just woke up. Anything we do here must be fast: this runs
+# before the machine actually sleeps, and a hang here looks exactly like a crashed laptop.
+set -e
+
+log() { echo "hedron-handheld-sleep: $*" >&2; }
+
+case "$1/$2" in
+  pre/hibernate|pre/suspend|pre/suspend-then-hibernate)
+    # Flush the ring and let the capture daemon exit cleanly (it is per-user, so nsenter to the
+    # console user's bus if there is one; failure here is not worth delaying sleep over).
+    if [ -x /usr/bin/hedron-replay ]; then
+        timeout 3 /usr/bin/hedron-replay flush || log "replay flush skipped (no session user?)"
+    fi
+    # Remember the cap so post can restore the *mode*'s value, not a hardcoded one.
+    if [ -r /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ]; then
+        cat /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw \
+            >/run/hedron-tdp-saved 2>/dev/null || true
+    fi
+    ;;
+  post/suspend|post/hibernate|post/suspend-then-hibernate)
+    mode=$(sed -n '1p' /etc/hedron/handheld-mode 2>/dev/null || echo unknown)
+    case "$mode" in
+      battery|silent) want=9 ;;
+      balanced) want=15 ;;
+      performance) want=28 ;;
+      *) want="" ;;
+    esac
+    if [ -n "$want" ] && [ -w /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ]; then
+        echo $((want * 1000000)) >/sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw ||
+            log "could not re-apply the ${want} W cap"
+    fi
+    # Brightness: firmware is allowed to leave the panel black; do not let that be our bug.
+    for f in /sys/class/backlight/*/brightness; do
+        [ -w "$f" ] || continue
+        max=$(cat "$(dirname "$f")/max_brightness" 2>/dev/null || echo 0)
+        cur=$(cat "$f" 2>/dev/null || echo 1)
+        if [ "${cur:-0}" -le 0 ] && [ "${max:-0}" -gt 0 ]; then
+            echo $((max / 4)) >"$f" 2>/dev/null || log "brightness restore failed for $f"
+        fi
+    done
+    # The gamemode daemon may have lost the game (its claim expires on its own, but this makes
+    # the resume path deterministic).
+    if [ -x /usr/bin/hedron-gamemode ]; then
+        timeout 3 /usr/bin/hedron-gamemode status >/dev/null 2>&1 || log "gamemode daemon not up yet"
+    fi
+    ;;
+esac
+exit 0

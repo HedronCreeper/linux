@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""hedron-session-bridge — the two lines of glue between a compositor and FlowState.
+
+The problem: the compositor knows which window is focused and whether it is fullscreen; the
+performance daemon wants exactly that. Neither should have to depend on the other, and D-Bus
+is not reliably reachable from inside a Proton/Steam-Linux-Runtime sandbox.
+
+The bridge therefore exposes a *file* API that any compositor script can write to:
+`/run/user/$UID/hedron/focus.json` (atomic write, no socket needed) and forwards changes to
+`/run/user/$UID/hedron/flowstate.sock` when it sees one. KWin's script, the gamescope hook
+and `hedron-session-query` all use the same tiny format:
+
+  {"app_id": "cs2", "title": "Counter-Strike 2", "state": "fullscreen", "pid": 12345}
+
+`--once` prints what would be sent (used by tests and by `hedron-session doctor`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+FOCUS = os.path.expanduser("${XDG_RUNTIME_DIR}/hedron/focus.json").replace(
+    "${XDG_RUNTIME_DIR}", os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()))
+FLOWSTATE = os.path.expanduser(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+                               + "/hedron/flowstate.sock")
+LIVE = "/run/hedron/flowstate.sock"
+
+
+def read_focus() -> dict:
+    try:
+        with open(FOCUS, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_focus(app_id: str, title: str = "", state: str = "fullscreen", pid: int = 0) -> None:
+    """Called by compositor scripts (or by you, from a keybinding) to publish focus."""
+    os.makedirs(os.path.dirname(FOCUS), exist_ok=True)
+    tmp = FOCUS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"app_id": app_id, "title": title, "state": state, "pid": pid,
+                   "when": time.time()}, fh, sort_keys=True)
+    os.replace(tmp, FOCUS)
+
+
+def forward(doc: dict) -> tuple[bool, str]:
+    payload = "focus-changed %s %s\n" % (doc.get("app_id", "unknown"),
+                                         doc.get("state", "unknown") + ":" + (doc.get("title") or "")[:40])
+    for path in (FLOWSTATE, LIVE):
+        if not os.path.exists(path):
+            continue
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(path)
+            s.sendall(payload.encode())
+            reply = s.recv(4096).decode().strip()
+            s.close()
+            return True, "%s → %s" % (path, reply or "ok")
+        except OSError as exc:
+            return False, "%s: %s" % (path, exc)
+    return False, "no flowstate socket (is hedron-flowstate running?)"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-session-bridge", description=__doc__.splitlines()[0])
+    ap.add_argument("--publish", nargs="+", metavar=("APP_ID", "STATE"),
+                    help="write a focus event (used by compositor scripts and keybindings)")
+    ap.add_argument("--title", default="")
+    ap.add_argument("--once", action="store_true", help="forward the current focus file and exit")
+    ap.add_argument("--watch", action="store_true", help="forward whenever focus.json changes")
+    ap.add_argument("--interval", type=float, default=0.4)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    if args.publish:
+        app = args.publish[0]
+        state = args.publish[1] if len(args.publish) > 1 else "fullscreen"
+        write_focus(app, args.title, state, os.getppid())
+        doc = read_focus()
+        ok, why = forward(doc)
+        print(json.dumps({"published": doc, "forwarded": ok, "detail": why}, indent=1) if args.json
+              else ("ok: " + why))
+        return 0 if ok else 1
+    if args.once:
+        doc = read_focus()
+        if not doc:
+            print("nothing published yet (%s does not exist)" % FOCUS, file=sys.stderr)
+            return 1
+        ok, why = forward(doc)
+        print(json.dumps({"focus": doc, "forwarded": ok, "detail": why}, indent=1) if args.json
+              else why)
+        return 0 if ok else 1
+    if args.watch:
+        last = None
+        print("watching %s (Ctrl-C to stop)" % FOCUS, file=sys.stderr)
+        while True:
+            doc = read_focus()
+            stamp = doc.get("when")
+            if doc and stamp != last:
+                last = stamp
+                ok, why = forward(doc)
+                print("%s %s → %s" % (time.strftime("%H:%M:%S"), doc.get("app_id", "?"), why), flush=True)
+            time.sleep(args.interval)
+    ap.print_help()
+    print("\nhint: --publish <app-id> [fullscreen|windowed] or --watch", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(0)

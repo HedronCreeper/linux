@@ -1,0 +1,79 @@
+{
+ "arch": "x86_64",
+ "backup": [],
+ "conflicts": [],
+ "depends": [
+  "python",
+  "bash"
+ ],
+ "dirs": [
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/hedron/overlay",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/user",
+  "/usr/lib/tmpfiles.d",
+  "/usr/share",
+  "/usr/share/kwin",
+  "/usr/share/kwin/scripts",
+  "/usr/share/kwin/scripts/hedron-vitals",
+  "/usr/share/kwin/scripts/hedron-vitals/contents/code",
+  "/usr/share/plasma",
+  "/usr/share/plasma/applets",
+  "/usr/share/plasma/applets/hedronos.vitals",
+  "/usr/share/plasma/applets/hedronos.vitals/contents",
+  "/usr/share/plasma/applets/hedronos.vitals/contents/ui"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-vitals-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-vitals",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedron-vitalsd.py",
+  "/usr/lib/hedron/overlay/",
+  "/usr/lib/hedron/overlay/hedron-vitals.qml",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/user/",
+  "/usr/lib/systemd/user/hedron-vitalsd.service",
+  "/usr/lib/tmpfiles.d/",
+  "/usr/lib/tmpfiles.d/hedron-vitals.conf",
+  "/usr/share/",
+  "/usr/share/kwin/",
+  "/usr/share/kwin/scripts/",
+  "/usr/share/kwin/scripts/hedron-vitals/",
+  "/usr/share/kwin/scripts/hedron-vitals/contents/code/main.qml",
+  "/usr/share/kwin/scripts/hedron-vitals/main.js",
+  "/usr/share/kwin/scripts/hedron-vitals/metadata.json",
+  "/usr/share/plasma/",
+  "/usr/share/plasma/applets/",
+  "/usr/share/plasma/applets/hedronos.vitals/",
+  "/usr/share/plasma/applets/hedronos.vitals/contents/",
+  "/usr/share/plasma/applets/hedronos.vitals/contents/ui/",
+  "/usr/share/plasma/applets/hedronos.vitals/contents/ui/main.qml",
+  "/usr/share/plasma/applets/hedronos.vitals/metadata.json"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-vitals",
+ "optional": [
+  "nvidia-utils",
+  "corectrl",
+  "lm_sensors",
+  "jq"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [],
+ "size": 0,
+ "summary": "Single system-wide sampler for temps, clocks, frame times and pressure, with HUD and CLI",
+ "units": [
+  "usr/lib/systemd/user/hedron-vitalsd.service"
+ ],
+ "version": "1.0.0"
+}

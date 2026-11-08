@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS FlowState daemon (engages performance profiles for games)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=graphical.target systemd-user-sessions.service
+Before=display-manager.service
+Wants=hedron-flowstate-apply@boot.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedronflowd.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+# It writes /proc/sys and /sys, so it needs root — but nothing else: no network, no
+# user files, and /run is the only place it may create nodes.
+User=root
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallFilter=@system-service @resource
+AmbientCapabilities=
+Nice=0
+
+[Install]
+WantedBy=multi-user.target

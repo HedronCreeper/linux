@@ -1,0 +1,19 @@
+# FlowState overlay: AMD GPU hardware.  SPDX-License-Identifier: MIT
+# Applied on top of any profile when the primary GPU is AMD (vendor == "amd").
+overlay = true
+
+[gpu]
+# amdgpu exposes one knob for the whole power story; `high` keeps clocks up so the first
+# frame after alt-tab is not an outlier, and auto lets battery/silence profiles cool down.
+power_profile = "auto"
+"pp_num_vf_levels" = "auto"
+"power_dpm_force_performance_level" = "auto"
+
+[sysfs]
+"sys/module/amdgpu/parameters/vsync_mode" = "1"
+"sys/module/amdgpu/parameters/dm_abm_level" = "auto"
+
+[extra]
+# The in-kernel driver has a proper power-profile sysfs on APUs; we use it instead of
+# shipping a third-party daemon (CoreCtrl remains optional and is *not* started here).
+apu-gfx = { mode = "skip", command = "APU iGPU: graphics memory is capped by amdgpu.gttsize / BIOS, not by us" }

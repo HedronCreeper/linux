@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""mkhedronpkg — build a HedronOS native package from `packages/<name>/`.
+
+Why a custom packer instead of makepkg? Two reasons, both real:
+  1. the ISO build must run on a Debian/Fedora host (inside a container or with
+     --dry-run), where makepkg exists but its PKGBUILD machinery would force us to
+     duplicate every source into a tarball;
+  2. `--dry-run` has to produce the *same manifest* the real build produces, so that
+     tools/hedronos-verify can prove file ownership, ExecStart coverage and unit
+     enablement before a single package is compiled.
+
+On an Arch host with makepkg present we still do the packing ourselves (tar + .PKGINFO)
+because that keeps one code path for real and rehearsal builds. The output is a normal
+`.pkg.tar.zst` that `repo-add`/`pacman -U` accept.
+
+  mkhedronpkg --src packages/hedronos-tune --out work/packages [--dry-run]
+  mkhedronpkg --builddb work/packages --db work/repo/hedron-os.db
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from hedronlib.util import load_toml  # noqa: E402
+
+PKGINFO_KEYS = ("pkgname", "pkgbase", "pkgver", "pkgdesc", "url", "builddate", "packager",
+                "size", "arch", "license")
+
+
+class PackageError(Exception):
+    pass
+
+
+def load_manifest(src: str) -> dict:
+    path = os.path.join(src, "hedronpkg.toml")
+    if not os.path.isfile(path):
+        raise PackageError("%s has no hedronpkg.toml" % src)
+    try:
+        return load_toml(path)
+    except Exception as exc:  # noqa: BLE001
+        raise PackageError("%s: unparsable hedronpkg.toml: %s" % (path, exc)) from exc
+
+
+# Vendored copies: `install.vendored` copies tools/hedronlib into each package so the
+# installed system never depends on the source tree being present.
+
+
+def run_build(manifest: dict, workdir: str, jobs: int, dry: bool) -> None:
+    build = manifest.get("build", {}) or {}
+    cmd = build.get("command")
+    if not cmd:
+        return
+    if dry:
+        print("  [dry] build: %s" % cmd)
+        return
+    full = cmd.replace("@JOBS@", "-j%d" % jobs)
+    proc = subprocess.run(["bash", "-o", "pipefail", "-c", full], cwd=workdir,
+                          capture_output=True, text=True, env={**os.environ, "SRCDEST": workdir})
+    if proc.returncode != 0:
+        raise PackageError("build failed (%s):\n%s\n%s" % (full, proc.stdout[-3000:], proc.stderr[-3000:]))
+
+
+def install_tree(manifest: dict, srcdir: str, pkgdir: str, dry: bool) -> list[tuple[str, str, int]]:
+    """Returns the list of (relative target path, source path, mode) it installed."""
+    install = manifest.get("install", {}) or {}
+    modes = install.get("modes", {}) or {}
+    placed: list[tuple[str, str, int]] = []
+
+    def mode_for(rel: str, default: int = 0o644) -> int:
+        for key, value in modes.items():
+            if rel == key or rel.endswith(key):
+                return int(str(value), 8) if isinstance(value, str) else int(value)
+        return default
+
+    def copy_in(src_path: str, rel_target: str) -> None:
+        dst = os.path.join(pkgdir, rel_target.lstrip("/"))
+        mode = mode_for(rel_target, 0o755 if os.access(src_path, os.X_OK) else 0o644)
+        placed.append((rel_target, src_path, mode))
+        if dry:
+            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.isdir(src_path):
+            shutil.copytree(src_path, dst, dirs_exist_ok=True, symlinks=True)
+            for root, dirs, files in os.walk(dst):
+                for name in files + dirs:
+                    os.chmod(os.path.join(root, name), 0o755 if os.access(os.path.join(root, name), os.X_OK) else 0o644)
+        else:
+            shutil.copy2(src_path, dst)
+        os.chmod(dst, mode) if not dry and os.path.exists(dst) else None
+
+    tree = install.get("tree")
+    if tree:
+        root = os.path.join(srcdir, tree)
+        if not os.path.isdir(root):
+            raise PackageError("install.tree points at %s which does not exist" % root)
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in {"__pycache__"})
+            for name in sorted(filenames):
+                full = os.path.join(dirpath, name)
+                rel = os.path.relpath(full, root)
+                if rel.endswith((".pyc", ".pyo")) or rel.startswith("hedronlib/"):
+                    continue  # vendored copies handle the library
+                copy_in(full, "/" + rel)
+            for name in sorted(dirnames):
+                full = os.path.join(dirpath, name)
+                rel = os.path.relpath(full, root)
+                if rel.startswith("hedronlib"):
+                    continue
+                placed.append(("/" + rel + "/", full, 0o755))
+
+    for entry in install.get("files", []) or []:
+        copy_in(os.path.join(srcdir, entry["src"]), "/" + entry["dst"].lstrip("/"))
+    for entry in install.get("copies", []) or []:
+        copy_in(os.path.join(srcdir, entry["src"]), "/" + entry["dst"].lstrip("/"))
+
+    # vendored shared library
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for entry in (manifest.get("install", {}) or {}).get("vendored", []) or []:
+        source = entry["from"]
+        if not os.path.isabs(source):
+            candidate = os.path.join(srcdir, source)
+            if not os.path.isdir(candidate):
+                candidate = os.path.join(here, source)
+            if not os.path.isdir(candidate):
+                candidate = os.path.join(here, "tools", "hedronlib")
+            if not os.path.isdir(candidate):
+                raise PackageError("vendored source %s not found (looked in %s)"
+                                   % (entry["from"], srcdir))
+            source = candidate
+        copy_in(source, "/" + entry["to"].lstrip("/"))
+    return placed
+
+
+def write_links(manifest: dict, pkgdir: str, dry: bool) -> list[str]:
+    links = manifest.get("install", {}).get("links", []) or []
+    made = []
+    for entry in links:
+        target, link = entry["target"].lstrip("/"), entry["link"].lstrip("/")
+        made.append(link)
+        if dry:
+            continue
+        dst = os.path.join(pkgdir, link)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.islink(dst) or os.path.exists(dst):
+            os.unlink(dst)
+        os.symlink(os.path.join("/", target), dst)
+    return made
+
+
+def package_size(pkgdir: str) -> int:
+    total = 0
+    for dirpath, _dirs, files in os.walk(pkgdir):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total
+
+
+def write_pkginfo(manifest: dict, pkgdir: str, arch: str, size: int, builddate: int) -> str:
+    pkg = manifest.get("package", {}) or {}
+    name = pkg.get("name")
+    if not name:
+        raise PackageError("[package].name is required")
+    lines = [
+        "# Generated by mkhedronpkg",
+        "pkgbase = %s" % pkg.get("pkgbase", name),
+        "pkgname = %s" % name,
+        "pkgver = %s-%s" % (pkg.get("version", "0.0.0"), pkg.get("release", "1")),
+        "pkgdesc = %s" % pkg.get("summary", "HedronOS package"),
+        "url = %s" % pkg.get("url", "https://github.com/HedronCreeper/linux"),
+        "builddate = %d" % builddate,
+        "packager = HedronOS Build <build@hedronos.local>",
+        "size = %d" % size,
+        "arch = %s" % arch,
+    ]
+    for lic in pkg.get("license", ["MIT"]):
+        lines.append("license = %s" % lic)
+    for group in pkg.get("groups", []):
+        lines.append("group = %s" % group)
+    dep = manifest.get("depends", {}) or {}
+    for item in dep.get("runtime", []) or []:
+        lines.append("depend = %s" % item)
+    for item in dep.get("check", []) or []:
+        lines.append("checkdepend = %s" % item)
+    for item in dep.get("optional", []) or []:
+        lines.append("optdepend = %s\n%s" % (item[0], item[1]) if isinstance(item, list) else "optdepend = %s" % item)
+    for prov in (manifest.get("provides", {}) or {}).get("packages", []) or []:
+        lines.append("provides = %s" % prov)
+    for conf in (manifest.get("conflicts", {}) or {}).get("packages", []) or []:
+        lines.append("conflict = %s" % conf)
+    for repl in pkg.get("replaces", []) or []:
+        lines.append("replaces = %s" % repl)
+    backup = manifest.get("files", {}).get("preserve", []) or []
+    for path in backup:
+        lines.append("backup = %s" % path.lstrip("/"))
+    return "\n".join(lines) + "\n"
+
+
+def build_package(src: str, out: str, arch: str = "x86_64", jobs: int = 4,
+                  dry: bool = False, overrides: dict[str, str] | None = None) -> dict:
+    manifest = load_manifest(src)
+    manifest["_src"] = src
+    if overrides:
+        manifest.setdefault("package", {}).update(overrides)
+    pkg = manifest.get("package", {}) or {}
+    name = pkg.get("name") or os.path.basename(src.rstrip("/"))
+    version = pkg.get("version", "0.0.0")
+    release = str(pkg.get("release", "1"))
+    filename = "%s-%s-%s-%s.pkg.tar.zst" % (name, version, release, arch)
+
+    print("  package : %s %s-%s (%s)" % (name, version, release, arch))
+    workdir = tempfile.mkdtemp(prefix="mkhedronpkg-")
+    pkgdir = os.path.join(workdir, "pkg")
+    os.makedirs(pkgdir, exist_ok=True)
+    try:
+        run_build(manifest, os.path.join(src), jobs, dry)
+        placed = install_tree(manifest, src, pkgdir, dry)
+        links = write_links(manifest, pkgdir, dry)
+        size = 0 if dry else package_size(pkgdir)
+        now = int(time.time())
+        pkginfo = write_pkginfo(manifest, pkgdir, arch, size, now)
+        if not dry:
+            with open(os.path.join(pkgdir, ".PKGINFO"), "w", encoding="utf-8") as fh:
+                fh.write(pkginfo)
+            mtree = [
+                "##mtree format: v2",
+                "@root /",
+                "@uname root",
+                "@gname root",
+            ]
+            for rel, _src_path, mode in sorted(placed):
+                if rel.endswith("/"):
+                    mtree.append("dir %s 0755 root root" % rel.rstrip("/"))
+                else:
+                    mtree.append("file %s %04o root root -" % (rel, mode))
+            for link in links:
+                mtree.append("link /%s 0777 root root" % link)
+            with open(os.path.join(pkgdir, ".MTREE"), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(mtree) + "\n")
+            os.makedirs(out, exist_ok=True)
+            dest = os.path.join(out, filename)
+            create_zst(pkgdir, dest)
+        else:
+            dest = os.path.join(out, filename)
+        listing = [rel for rel, _p, _m in placed] + ["/" + l for l in links]
+        manifest_out = {
+            "name": name, "version": version, "release": release, "arch": arch,
+            "filename": os.path.basename(dest), "size": size,
+            "summary": pkg.get("summary", ""), "license": pkg.get("license", ["MIT"]),
+            "depends": (manifest.get("depends", {}) or {}).get("runtime", []),
+            "optional": (manifest.get("depends", {}) or {}).get("optional", []),
+            "provides": (manifest.get("provides", {}) or {}).get("packages", []),
+            "conflicts": (manifest.get("conflicts", {}) or {}).get("packages", []),
+            "services_enable": (manifest.get("services", {}) or {}).get("enable", []),
+            "units": (manifest.get("services", {}) or {}).get("units", []),
+            "files": sorted(set(listing)),
+            "dirs": sorted({os.path.dirname(p) for p in listing if os.path.dirname(p)}),
+            "backup": (manifest.get("files", {}) or {}).get("preserve", []),
+            "dry_run": dry,
+        }
+        print("  files   : %d  size: %.1f KiB" % (len(listing), size / 1024))
+        if dry:
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, filename + ".manifest.json"), "w", encoding="utf-8") as fh:
+                import json
+                json.dump(manifest_out, fh, indent=1, sort_keys=True)
+                fh.write("\n")
+        else:
+            import json
+            with open(dest + ".manifest.json", "w", encoding="utf-8") as fh:
+                json.dump(manifest_out, fh, indent=1, sort_keys=True)
+                fh.write("\n")
+            print("  wrote   : %s" % dest)
+        return manifest_out
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def create_zst(pkgdir: str, dest: str) -> None:
+    """Write a .pkg.tar.zst: plain tar, then zstd if present, else xz via tarfile."""
+
+    def normalise(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+        ti.uid = ti.gid = 0
+        ti.uname = "root"
+        ti.gname = "root"
+        if ti.name.startswith("./"):
+            ti.name = ti.name[2:]
+        return ti
+
+    tmp = dest + ".tar.tmp"
+    if shutil.which("zstd"):
+        with tarfile.open(tmp, "w") as tar:
+            tar.add(pkgdir, arcname=".", filter=normalise)
+        subprocess.run(["zstd", "-q", "-T0", "-3", "-f", tmp, "-o", dest], check=True)
+        os.unlink(tmp)
+    else:
+        dest = re.sub(r"\.zst$", ".xz", dest)
+        with tarfile.open(dest, "w:xz") as tar:
+            tar.add(pkgdir, arcname=".", filter=normalise)
+
+
+def write_index(packages_dir: str, db_path: str) -> int:
+    """Build a pacman-style sync database (repo-add fallback): .files + .db as tar.zst."""
+    manifests = []
+    for name in sorted(os.listdir(packages_dir)) if os.path.isdir(packages_dir) else []:
+        if name.endswith(".manifest.json"):
+            with open(os.path.join(packages_dir, name), encoding="utf-8") as fh:
+                import json
+                manifests.append(json.load(fh))
+    if not manifests:
+        # No dry-run manifests: read the real package files instead.
+        for fname in sorted(os.listdir(packages_dir)) if os.path.isdir(packages_dir) else []:
+            if fname.endswith((".pkg.tar.zst", ".pkg.tar.xz", ".pkg.tar.gz")):
+                manifests.append({"name": fname.split("-")[0], "filename": fname, "files": [],
+                                  "depends": [], "size": os.path.getsize(os.path.join(packages_dir, fname))})
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
+    base = os.path.splitext(os.path.splitext(db_path)[0])[0]  # strip .db
+    with tempfile.TemporaryDirectory() as tmp:
+        for entry in manifests:
+            pkgdir = os.path.join(tmp, entry["name"])
+            os.makedirs(pkgdir, exist_ok=True)
+            lines = ["# HedronOS local repository entry",
+                     "%s = %s" % ("pkgname", entry["name"]),
+                     "%s = %s" % ("pkgver", "%s-%s" % (entry.get("version", "0"), entry.get("release", "1"))),
+                     "%s = %s" % ("pkgdesc", entry.get("summary", "")),
+                     "%s = %d" % ("size", entry.get("size", 0)),
+                     "%s = %s" % ("filename", entry.get("filename", ""))]
+            for dep in entry.get("depends", []):
+                lines.append("depend = %s" % dep)
+            for f in entry.get("files", []):
+                lines.append("files = %s" % f)
+            with open(os.path.join(pkgdir, ".PKGINFO"), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        for suffix, entries in (("db", ["%s/.PKGINFO" % m["name"] for m in manifests]),
+                                ("files", ["%s/.PKGINFO" % m["name"] for m in manifests])):
+            if not entries:
+                continue
+            out = "%s.%s" % (base, suffix)
+            with tarfile.open(out, "w") as tar:
+                for rel in entries:
+                    tar.add(os.path.join(tmp, rel), arcname=rel)
+            if shutil.which("zstd"):
+                subprocess.run(["zstd", "-q", "-f", out, "-o", out + ".zst"], check=True)
+                os.unlink(out)
+                out = out + ".zst"
+            print("  db      : %s (%d entries)" % (out, len(entries)))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--src", help="package source directory (packages/<name>)")
+    ap.add_argument("--out", default="work/packages")
+    ap.add_argument("--arch", default="x86_64")
+    ap.add_argument("--jobs", default="4")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--set", action="append", default=[], help="override [package] key=value")
+    ap.add_argument("--builddb", default=None, help="build a repo db from a package dir")
+    ap.add_argument("--db", default=None)
+    args = ap.parse_args(argv)
+
+    if args.builddb:
+        if not args.db:
+            ap.error("--builddb needs --db")
+        return write_index(args.builddb, args.db)
+    if not args.src:
+        ap.error("--src is required unless --builddb is used")
+    overrides = {}
+    for item in args.set:
+        key, _, value = item.partition("=")
+        overrides[key.strip()] = value.strip()
+    try:
+        build_package(args.src, args.out, args.arch, max(1, int(args.jobs)), args.dry_run, overrides)
+    except PackageError as exc:
+        print("mkhedronpkg: %s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

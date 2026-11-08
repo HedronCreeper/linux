@@ -1,0 +1,39 @@
+[Unit]
+Description=HedronOS game claim daemon (per user)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=pam-cloexec.slice
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hgm --daemon
+Restart=on-failure
+RestartSec=2
+# The daemon only ever binds one socket in its own runtime dir and signals processes; it
+# needs no capabilities, no network and no view of /home.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+UMask=0077
+RuntimeDirectory=hedron
+RuntimeDirectoryMode=0700
+# Idle exit: if nothing has claimed in 10 minutes there is no game to serve, and a daemon
+# that outlives the session is a support ticket about "why is there an hgm process".
+Environment=HEDRON_GAMEMODE_IDLE_EXIT=600
+
+[Install]
+WantedBy=graphical-session.target

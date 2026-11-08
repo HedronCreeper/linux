@@ -1,0 +1,42 @@
+# hedronos-handheld — power modes + the gamescope session. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-handheld"
+version = "1.0.0"
+release = "1"
+summary = "Handheld support: TDP/power modes, gamescope Deck session, controller button hwdb, suspend hooks"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["bash", "python", "systemd-libs"]
+build = []
+check = ["python"]
+optional = ["gamescope", "steamos-manager", "mangohud", "iio-sensor-proxy"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-handheld" = "0755"
+"usr/bin/hedron-deck-session" = "0755"
+"usr/lib/hedron/handheld/modes.toml" = "0644"
+"etc/hedron/deck.conf" = "0644"
+"etc/udev/hwdb.d/99-hedron-handheld.hwdb" = "0644"
+"usr/lib/systemd/system-sleep/hedron-handheld" = "0755"
+"usr/share/applications/hedron-handheld.desktop" = "0644"
+"usr/share/applications/hedron-deck-session.desktop" = "0644"
+"README.md" = "0644"
+
+[files]
+preserve = ["/etc/hedron/deck.conf", "/etc/hedron/handheld-mode", "/etc/udev/hwdb.d/99-hedron-handheld.hwdb"]
+trigger = [{ path = "/etc/udev/hwdb.d", install = "/usr/bin/systemd-hwdb update", message = "rebuild the hwdb so the extra buttons work on the next plug-in", needs = "/usr/bin/systemd-hwdb" }]
+
+[services]
+enable = []
+# No units: the system-sleep hook is dropped into /usr/lib/systemd/system-sleep and the session
+# is started by the session entry (hedron-deck-session) or the .desktop file.
+
+[tests]
+modules = ["tests/test_handheld_modes.py"]

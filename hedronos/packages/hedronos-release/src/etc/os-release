@@ -1,0 +1,18 @@
+NAME="HedronOS"
+VERSION="1.0.0 (Halcyon)"
+ID=hedronos
+ID_LIKE=arch
+BUILD_ID=rolling
+PRETTY_NAME="HedronOS 1.0.0 Halcyon"
+ANSI_COLOR="38;2;124;196;255"
+HOME_URL="https://github.com/HedronCreeper/linux/tree/master/hedronos"
+SUPPORT_URL="https://github.com/HedronCreeper/linux/issues"
+BUG_REPORT_URL="https://github.com/HedronCreeper/linux/issues"
+PRIVACY_POLICY_URL="https://github.com/HedronCreeper/linux/tree/master/hedronos/docs/PRIVACY.md"
+CPE_NAME="cpe:/o:hedronos:hedronos:1.0.0"
+LOGO=hedron-logo
+# HedronOS-specific, read by hedronctl and the installer:
+HEDRONOS_EDITION="gaming"
+HEDRONOS_BASE="arch-rolling"
+HEDRONOS_KERNEL="7.4.0-hedron1"
+HEDRONOS_CODENAME="Halcyon"

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=HedronOS Deck Session
+Comment=Gamepad-first full-screen session for handhelds (gamescope + quick access menu)
+Exec=/usr/bin/hedron-deck-session
+Type=Application
+DesktopNames=HedronOS-Deck
+X-VTAutoNum=1

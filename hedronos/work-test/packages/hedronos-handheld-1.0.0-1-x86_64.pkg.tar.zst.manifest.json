@@ -1,0 +1,72 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/deck.conf",
+  "/etc/hedron/handheld-mode",
+  "/etc/udev/hwdb.d/99-hedron-handheld.hwdb"
+ ],
+ "conflicts": [],
+ "depends": [
+  "bash",
+  "python",
+  "systemd-libs"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/udev",
+  "/etc/udev/hwdb.d",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/hedron/handheld",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/system-sleep",
+  "/usr/share",
+  "/usr/share/applications",
+  "/usr/share/hedron",
+  "/usr/share/hedron/handheld"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-handheld-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/udev/",
+  "/etc/udev/hwdb.d/",
+  "/etc/udev/hwdb.d/99-hedron-handheld.hwdb",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-deck-session",
+  "/usr/bin/hedron-handheld",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/handheld/",
+  "/usr/lib/hedron/handheld/modes.toml",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/system-sleep/",
+  "/usr/lib/systemd/system-sleep/hedron-handheld",
+  "/usr/share/",
+  "/usr/share/applications/",
+  "/usr/share/applications/hedron-deck-session.desktop",
+  "/usr/share/applications/hedron-handheld.desktop",
+  "/usr/share/hedron/",
+  "/usr/share/hedron/handheld/"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-handheld",
+ "optional": [
+  "gamescope",
+  "steamos-manager",
+  "mangohud",
+  "iio-sensor-proxy"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [],
+ "size": 0,
+ "summary": "Handheld support: TDP/power modes, gamescope Deck session, controller button hwdb, suspend hooks",
+ "units": [],
+ "version": "1.0.0"
+}

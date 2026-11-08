@@ -1,0 +1,38 @@
+# FlowState: performance — plugged-in desktop, no compromises (benchmarks, 240 Hz).
+# SPDX-License-Identifier: MIT
+[profile]
+name = "performance"
+inherits = "gaming"
+note = "Everything up: no power saving at all. Loud and hot by design."
+
+[cpu]
+governor = "performance"
+energy_performance_preference = "performance"
+boost = true
+hwp_dynamic = false
+disable_idle_states = [1, 2, 3]
+
+[sysctl]
+"kernel.sched_min_granularity_ns" = 10000000
+"kernel.sched_wakeup_granularity_ns" = 15000000
+"kernel.sched_migration_cost_ns" = 1200000
+"vm.stat_interval" = 60
+"vm.watermark_scale_factor" = 500
+"vm.percpu_pagelist_high_fraction" = 64
+"net.core.busy_poll" = 50
+"net.core.busy_read" = 50
+
+[sysfs]
+"sys/devices/system/cpu/intel_pstate/min_perf_pct" = 100
+"sys/devices/system/cpu/cpufreq/boost" = 1
+"sys/kernel/debug/dri/0/amdgpu_dm_dp_dsc_force_dtype" = "auto"
+
+[gpu]
+power_profile = "high"
+power_cap = "max"
+
+[sched]
+scheduler = "hedron"
+
+[extra]
+warning = { mode = "skip", command = "this profile can cost 60-120 W at idle; `hedron-tune profile set balanced` to undo it permanently" }

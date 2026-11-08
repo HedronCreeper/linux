@@ -1,0 +1,74 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/xdg/autostart/hedron-first-setup.desktop"
+ ],
+ "conflicts": [],
+ "depends": [
+  "bash",
+  "python",
+  "util-linux",
+  "btrfs-progs",
+  "sed"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/xdg",
+  "/etc/xdg/autostart",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/system",
+  "/usr/share",
+  "/usr/share/applications",
+  "/usr/share/hedron",
+  "/usr/share/hedron/setup"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-firstsetup-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/xdg/",
+  "/etc/xdg/autostart/",
+  "/etc/xdg/autostart/hedron-first-setup.desktop",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-setup",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedronos-install",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/system/",
+  "/usr/lib/systemd/system/hedron-setup.service",
+  "/usr/share/",
+  "/usr/share/applications/",
+  "/usr/share/applications/hedron-setup.desktop",
+  "/usr/share/applications/hedronos-install.desktop",
+  "/usr/share/hedron/",
+  "/usr/share/hedron/setup/",
+  "/usr/share/hedron/setup/Setup.qml"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-firstsetup",
+ "optional": [
+  "qml6",
+  "kirigami2",
+  "arch-install-scripts",
+  "dosfstools",
+  "efibootmgr",
+  "grub"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [],
+ "size": 0,
+ "summary": "HedronOS installer: app chooser (TUI + Kirigami GUI) and the disk installer behind it",
+ "units": [
+  "usr/lib/systemd/system/hedron-setup.service"
+ ],
+ "version": "1.0.0"
+}

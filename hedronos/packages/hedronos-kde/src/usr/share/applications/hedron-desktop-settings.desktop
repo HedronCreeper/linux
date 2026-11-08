@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=HedronOS Desktop Settings
+GenericName=Desktop defaults
+Comment=Apply, check or undo the HedronOS KDE defaults
+Exec=hedron-kde-apply status
+Terminal=true
+Icon=preferences-desktop-display
+Categories=Settings;DesktopSettings;Qt;
+Keywords=kde;plasma;theme;colours;kwin;defaults;

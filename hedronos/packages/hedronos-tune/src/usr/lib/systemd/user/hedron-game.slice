@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS game slice (real CPU weight, no memory-pressure kills, IO priority)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+
+[Slice]
+# 280 vs the default 100 is deliberate: a game must win contention against
+# shader-compile/Steam-download noise without starving the compositor (which FlowState
+# boosts separately). Slice-level properties only — per-process knobs like
+# OOMScoreAdjust are set by hedron-run itself, since systemd has no slice equivalent.
+CPUWeight=280
+StartupCPUWeight=280
+IOWeight=220
+MemoryLow=2G
+MemoryMin=1G
+MemoryHigh=infinity
+TasksMax=8192

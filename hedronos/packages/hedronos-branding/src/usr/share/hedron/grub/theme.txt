@@ -1,0 +1,37 @@
+# GRUB graphical theme: same geometry, same palette, so switching bootloaders does not feel like
+# switching distributions. SPDX-License-Identifier: CC0-1.0
+title-text: ""
+desktop-image: "/usr/share/hedron/wallpapers/umbra.svg"
+terminal-font: "JetBrains Mono Regular 12"
++ title {
+    text = "HedronOS"
+    color = "#5ad2a0"
+    top = "25%"
+    left = "50%"
+    width = 320
+    align = "center"
+}
++ progress_bar {
+    id = "@timeout"
+    left = 20%
+    width = 60%
+    top = 80%
+    height = 8
+    highlight_color = "#5ad2a0"
+    bar_color = "#2f7f63"
+    border_color = "#3d3d48"
+}
++ menu {
+    top = 40%
+    left = "25%"
+    width = "50%"
+    height = 300
+    item_font = "JetBrains Mono Regular 12"
+    item_color = "#9aa5b1"
+    selected_item_color = "#5ad2a0"
+    icon_width = 24
+    icon_height = 24
+    item_height = 28
+    item_padding = 8
+    item_spacing = 2
+}

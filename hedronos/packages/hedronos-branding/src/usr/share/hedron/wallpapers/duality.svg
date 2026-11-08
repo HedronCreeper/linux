@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HedronOS default wallpaper: two interlocking tetrahedra (a stellated octahedron) over a
+     dawn gradient. Pure vector: it scales to 4K and 1200x800 handheld panels alike, weighs a
+     few KiB, and the compositor can blur it for the lock screen without a decode step.
+     SPDX-License-Identifier: CC0-1.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3840 2160" width="3840" height="2160">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#05080c"/>
+      <stop offset="0.55" stop-color="#0b1622"/>
+      <stop offset="0.85" stop-color="#1b3a3a"/>
+      <stop offset="1" stop-color="#2c5c4a"/>
+    </linearGradient>
+    <linearGradient id="edgeA" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5ad2a0"/>
+      <stop offset="1" stop-color="#2f7f63"/>
+    </linearGradient>
+    <linearGradient id="edgeB" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8b23a"/>
+      <stop offset="1" stop-color="#b0553f"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="9" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="vignette" cx="0.5" cy="0.45" r="0.75">
+      <stop offset="0.55" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.55"/>
+    </radialGradient>
+  </defs>
+  <rect width="3840" height="2160" fill="url(#sky)"/>
+  <g opacity="0.14" stroke="#9fd8ff" stroke-width="1">
+    <path d="M0 1730 H3840 M0 1806 H3840 M0 1890 H3840 M0 1982 H3840 M0 2082 H3840"/>
+  </g>
+  <g transform="translate(1920 1060)" fill="none" stroke-width="3" filter="url(#glow)">
+    <g stroke="url(#edgeA)" opacity="0.95">
+      <path d="M-620 420 L0 -760 L620 420 Z"/>
+      <path d="M-620 420 L0 130 L620 420 M0 -760 L0 130"/>
+    </g>
+    <g stroke="url(#edgeB)" opacity="0.85">
+      <path d="M-620 -420 L0 760 L620 -420 Z"/>
+      <path d="M-620 -420 L0 -130 L620 -420 M0 760 L0 -130"/>
+    </g>
+    <circle r="1030" stroke="#5ad2a0" stroke-opacity="0.18" stroke-width="2"/>
+    <circle r="1180" stroke="#e8eef2" stroke-opacity="0.08" stroke-width="1"/>
+  </g>
+  <rect width="3840" height="2160" fill="url(#vignette)"/>
+</svg>

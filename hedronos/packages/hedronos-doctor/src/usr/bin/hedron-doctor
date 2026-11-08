@@ -1,0 +1,840 @@
+#!/usr/bin/env python3
+"""hedron-doctor — "is this machine actually configured the way the distro claims?"
+
+One binary that answers the four questions people end up asking a forum with:
+
+  hedron-doctor status      green/red summary of every subsystem, one line each
+  hedron-doctor scan        the same, but deep (reads sysfs, dmesg, lsinitcpio, pacman, units)
+  hedron-doctor fix         the repairs, printed as commands; --yes runs them in dependency order
+  hedron-doctor report      a redacted tarball for a bug report: everything we can see, nothing
+                            that identifies you beyond hostnames and PCI ids
+  hedron-doctor bench       a two-minute measurement you can run before and after a change
+  hedron-doctor verify      the distro's own file/unit promises (the same code the ISO gate runs)
+
+Every finding carries `fix` — a concrete command. A doctor that only tells you that something is
+wrong is a log viewer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", "/usr/lib/python3.13/site-packages/hedronlib"):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(9):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+
+from hedronlib import gpus  # noqa: E402
+from hedronlib.util import Check, human_bytes, load_json, load_toml, run, sha256_file, which  # noqa: E402
+
+ROOT = os.environ.get("HEDRON_ROOT", "")
+STATE = os.environ.get("HEDRON_STATE_DIR", "/var/lib/hedron")
+ETC = "/etc/hedron"        # always relative to $HEDRON_ROOT; call sites wrap it in path()
+DETECT_CACHE = "/var/cache/hedron/detect.json"
+
+
+def path(p: str) -> str:
+    """Resolve a system path against $HEDRON_ROOT — idempotently.
+
+    Several helpers read a path they built with path() themselves (a config file plus a directory),
+    so a second prefix would silently produce /tmp/root/tmp/root/... and every check would report
+    "absent" instead of the truth. Prefixing twice is therefore a no-op.
+    """
+    if not ROOT or not p.startswith("/"):
+        return p
+    if p.startswith(ROOT + os.sep) or p == ROOT:
+        return p
+    return ROOT + p
+
+
+def read(p: str, default: str = "") -> str:
+    """Read a file, resolving system paths against $HEDRON_ROOT.
+
+    Paths that already carry the prefix pass through untouched: most call sites here build them
+    with path() first (so os.path.exists() and read() see the same file), and prefixing twice is a
+    silent '' — which in a diagnostic tool is indistinguishable from "the kernel has no such knob".
+    """
+    full = p if (ROOT and p.startswith(ROOT + os.sep)) else path(p)
+    try:
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return default
+
+
+def cmd_out(argv: list[str]) -> tuple[int, str]:
+    if which(os.path.basename(argv[0])) is None:
+        return 127, ""
+    proc = run(argv, timeout=45)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def finding(name: str, ok: bool, detail: str, fix: str = "", hint: str = "",
+            severity: str = "error") -> Check:
+    return Check(name, ok, detail, fix or hint, severity)
+
+
+# --------------------------------------------------------------------- the checks
+def check_kernel() -> list[Check]:
+    out: list[Check] = []
+    uname = subprocess.run(["uname", "-r"], capture_output=True, text=True).stdout.strip()
+    is_hedron = "hedron" in uname
+    out.append(finding("kernel/running", is_hedron or True,
+                      "running %s%s" % (uname, "" if is_hedron else "  (not the HedronOS kernel)"),
+                      "the HedronOS kernel is optional: the distro works on linux-lts too; "
+                      "install with `sudo pacman -S linux-hedron linux-hedron-headers`",
+                      severity="warn" if not is_hedron else "info"))
+    cfg = None
+    for cand in ("/proc/config.gz", "/boot/config-%s" % uname, "/lib/modules/%s/config" % uname):
+        if os.path.exists(path(cand)):
+            cfg = cand
+            break
+    if cfg is None:
+        out.append(finding("kernel/config-read", False, "no readable kernel config for %s" % uname,
+                           "cannot verify the HedronOS feature symbols; enable CONFIG_IKCONFIG_PROC",
+                           severity="warn"))
+        return out
+    text = read(cfg)
+    if cfg.endswith(".gz"):
+        import gzip
+
+        with gzip.open(path(cfg), "rt", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    wanted = {
+        "CONFIG_PREEMPT_RT": "real-time preemption (audio + low-latency input)",
+        "CONFIG_SCHED_EXT": "scx_hedron scheduler",
+        "CONFIG_DRM_AMDGPU": "amdgpu driver",
+        "CONFIG_DRM_I915": "i915 driver",
+        "CONFIG_DRM_NOVA": "nova (new NVIDIA) driver",
+        "CONFIG_DM_VERITY": "read-only verified root for the --variant=uc image",
+        "CONFIG_BTRFS_FS": "install filesystem",
+        "CONFIG_DRM_EXEC": "the GEM execbuffer helper newer drivers need",
+    }
+    missing = []
+    for sym, why in wanted.items():
+        enabled = re.search("^%s=[ym]" % sym, text, re.M) or re.search("^%s=y$" % sym, text, re.M)
+        if not enabled:
+            missing.append("%s (%s)" % (sym, why))
+    out.append(finding("kernel/symbols", not missing,
+                       "%d/%d HedronOS symbols present" % (len(wanted) - len(missing), len(wanted))
+                       + (": missing " + ", ".join(missing) if missing else ""),
+                       "rebuild the kernel with hedronos_defconfig (see hedronos/kernel/)",
+                       severity="warn" if missing else "info"))
+    if "CONFIG_DRM_NOVA=y" in text and "CONFIG_DRM_NOUVEAU=y" in text:
+        out.append(finding("kernel/nova-vs-nouveau", False, "both NOVA and NOUVEAU are built in",
+                           "they bind the same devices; disable CONFIG_DRM_NOUVEAU or blacklist one",
+                           "warn"))
+    if "hedron" not in uname and not which("pacman"):
+        out.append(finding("kernel/package-mgr", True, "no pacman here (dev container?): package-level "
+                           "checks are skipped", "", "info"))
+    elif which("pacman"):
+        rc, _o = cmd_out(["pacman", "-Qi", "linux-hedron-headers"])
+        if rc not in (0, 127):
+            out.append(finding("kernel/headers", False,
+                               "linux-hedron-headers is not installed — every DKMS driver needs it "
+                               "(nvidia, and amdgpu-virtual if you use it)",
+                               "sudo pacman -S linux-hedron-headers", "error"))
+    if which("dkms"):
+        rc, o = cmd_out(["dkms", "status"])
+        if rc == 0 and o and "installed" not in o:
+            out.append(finding("kernel/dkms", False, "dkms reports nothing installed",
+                               "sudo hedron-drivers apply  (it builds the module for this kernel)", "warn"))
+    return out
+
+
+def check_pci_and_driver() -> list[Check]:
+    """The single most valuable check here: what the *kernel* bound vs. what our database says.
+
+    Everything else in the distro reasons from the PCI id; this compares that reasoning against
+    /sys, which is the only place the truth lives. It is how "the driver installed fine" and "I am
+    running llvmpipe" both turn into one line with a command attached.
+    """
+    out: list[Check] = []
+    try:
+        info = gpus.collect_system_info(sysfs_root=path("/sys"), proc_dir=path("/proc"))
+    except OSError as exc:
+        return [finding("gpu/sysfs", False, "cannot read %s: %s" % (path("/sys"), exc),
+                        "run `hedron-doctor scan` on the installed system", "warn")]
+    devices = [d for d in info.devices if d.is_gpu]
+    if not devices:
+        out.append(finding("gpu/devices", False, "no display class device found in sysfs",
+                           "fine in a VM; on real hardware check `lspci -nn | grep -i vga`", "warn"))
+        return out
+    db_path = path(os.path.join(ETC, "gpu-db.json"))
+    db = None
+    if os.path.exists(db_path):
+        try:
+            db = gpus.GpuDatabase(load_json(db_path) or {})
+        except (ValueError, KeyError, TypeError) as exc:
+            out.append(finding("gpu/database", False, "%s is unreadable: %s" % (db_path, exc),
+                               "sudo pacman -S hedronos-drivers", "error"))
+    else:
+        out.append(finding("gpu/database", False, "no GPU database at %s" % db_path,
+                           "sudo pacman -S hedronos-drivers  (the database ships inside it)", "error"))
+    for dev in devices:
+        expect = ""
+        ident = None
+        if db is not None:
+            ident = db.lookup(dev)
+            expect = ident.kmod or ""
+        link = path("/sys/bus/pci/devices/%s/driver" % dev.slot)
+        driver = os.path.basename(os.path.realpath(link)) if os.path.islink(link) else (dev.driver or "")
+        label = "gpu/%s" % dev.slot
+        if ident is None or not getattr(ident, "in_database", False):
+            out.append(finding(label, False, "%s %s is not in our GPU database" % (dev.key, dev.vendor_name),
+                               "sudo pacman -Syu hedronos-drivers  ·  then `hedron-drivers detect --json`",
+                               "warn"))
+            continue
+        if not driver:
+            out.append(finding(label, False, "%s (%s) has no driver bound at all"
+                               % (expect, ident.product_name or ident.family),
+                               "sudo hedron-drivers apply", "error"))
+            continue
+        ok = driver == expect or expect in driver
+        out.append(finding(label, ok,
+                           "%s -> %s%s" % (dev.slot, driver,
+                                           "" if ok else " (we expect %s: %s)" % (expect, ident.product_name or ident.family)),
+                           "sudo hedron-drivers apply" if not ok else "", "error"))
+        if driver == "nouveau":
+            out.append(finding("gpu/nouveau", True, "nouveau is bound to a %s - NVK works, GL is slower"
+                               % (ident.product_name or ident.family),
+                               "for RTX cards `sudo hedron-drivers apply` switches to nvidia-open", "info"))
+        if "nvidia" in driver:
+            cmdline = read("/proc/cmdline")
+            if "nvidia_drm.modeset=1" not in cmdline and "nvidia-drm.modeset=1" not in cmdline:
+                out.append(finding("gpu/nvidia-modeset", False,
+                                   "nvidia is bound but nvidia_drm.modeset=1 is not on the kernel command line "
+                                   "(Wayland and PRIME will misbehave)",
+                                   "sudo hedron-drivers apply  (it writes the cmdline and the bootloader entries)",
+                                   "error"))
+            else:
+                out.append(finding("gpu/nvidia-modeset", True, "nvidia_drm.modeset=1 present", "", "info"))
+            if info.secure_boot:
+                out.append(finding("gpu/nvidia-secureboot", True,
+                                   "Secure Boot is on: out-of-tree modules must be signed or MOK-enrolled",
+                                   "if nvidia will not load: enroll the signing key (mokutil --import) and "
+                                   "rebuild the initramfs", "info"))
+    return out
+
+
+def check_dmesg() -> list[Check]:
+    out: list[Check] = []
+    rc, text = cmd_out(["journalctl", "-k", "-b", "--no-pager"])
+    if rc != 0:
+        rc, text = cmd_out(["dmesg"])
+    if rc == 127:
+        out.append(finding("logs/kernel", False, "neither journalctl nor dmesg is readable here",
+                           "run `hedron-doctor scan` as root for the full log checks", "warn"))
+        return out
+    bad = [line for line in text.splitlines()
+           if re.search(r"(failed to initialize|Direct firmware load for .* failed|ERROR: drm|"
+                        r"amdgpu: .* ring test failed|NVRM: .*Failed to initialize|nouveau: .*error)",
+                        line, re.I)]
+    fw = sorted({m for line in text.splitlines() for m in re.findall(r"Direct firmware load for (\S+)", line)})
+    out.append(finding("logs/gpu-errors", not bad,
+                       "%d suspicious kernel line(s)%s" % (len(bad), ": " + bad[-1][:90] if bad else ""),
+                       "see `hedron-doctor report` for the full log slice, then re-run "
+                       "`sudo hedron-drivers apply --rebind`", "error" if bad else "info"))
+    if fw:
+        out.append(finding("firmware/missing", False,
+                           "firmware requested but not found: " + ", ".join(fw[:6]),
+                           "sudo pacman -S linux-firmware", "error"))
+    return out
+
+
+def check_initramfs() -> list[Check]:
+    out: list[Check] = []
+    boot = path("/boot")
+    if not os.path.isdir(boot):
+        out.append(finding("boot/exists", False, "no /boot here", "run this on an installed system", "warn"))
+        return out
+    kernels = [f for f in sorted(os.listdir(boot)) if f.startswith("vmlinuz")]
+    inits = {f[len("initramfs-"):] for f in os.listdir(boot) if f.startswith("initramfs-")}
+    for k in kernels:
+        variant = k[len("vmlinuz-"):]
+        if variant not in inits:
+            out.append(finding("boot/initramfs-%s" % variant, False, "%s has no initramfs image" % k,
+                               "sudo mkinitcpio -P", "error"))
+            continue
+        kpath, ipath = os.path.join(boot, k), os.path.join(boot, "initramfs-%s.img" % variant)
+        if os.path.getmtime(ipath) < os.path.getmtime(kpath):
+            out.append(finding("boot/initramfs-fresh-%s" % variant, False,
+                               "the initramfs is older than the kernel it must match",
+                               "sudo mkinitcpio -p linux-%s  (or: sudo mkinitcpio -P)" % variant, "error"))
+    if which("lsinitcpio") and inits:
+        # A missing GPU module in the initramfs is the classic "black screen until the root
+        # filesystem mounts" report, and it is one listing away from being provable.
+        img = sorted(inits)[0]
+        rc, listing = cmd_out(["lsinitcpio", path("/boot/initramfs-%s.img" % img)])
+        if rc == 0:
+            want = {"nvidia": "nvidia", "amdgpu": "amdgpu", "i915": "i915"}
+            bound = {m for m in want if re.search(r"\b%s\.ko" % want[m], listing)}
+            if bound:
+                out.append(finding("boot/initramfs-modules", True,
+                                   "%s contains: %s" % (img, ", ".join(sorted(bound))), "", "info"))
+            else:
+                out.append(finding("boot/initramfs-modules", False,
+                                   "%s contains no GPU driver module" % img,
+                                   "add the hook the driver package documents, then `sudo mkinitcpio -P`",
+                                   "warn"))
+    hooks = read(path("/etc/mkinitcpio.d/linux-hedron.preset"))
+    if hooks and "hedron-early" not in hooks:
+        out.append(finding("boot/hooks", False, "the HedronOS mkinitcpio hooks are not in the preset",
+                           "sudo hedron-drivers apply (it adds them) then sudo mkinitcpio -P", "warn"))
+    return out
+
+
+def check_units() -> list[Check]:
+    out: list[Check] = []
+    if which("systemctl") is None:
+        return [finding("units/systemd", False, "no systemctl here (container?)",
+                        "unit checks need a systemd host", "warn")]
+    units = ["hedronos-drivers.service", "hedron-tune.service", "hedron-flowstate.socket",
+             "hedrostd.socket", "hedron-vitalsd.socket"]
+    for unit in units:
+        rc, state = cmd_out(["systemctl", "is-enabled", unit])
+        if rc == 127:
+            break
+        enabled = (state or "").strip()
+        if enabled in ("", "disabled", "static", "not-found", "masked"):
+            sev = "warn" if "socket" in unit else "error"
+            out.append(finding("units/%s" % unit, False, "%s is %s" % (unit, enabled or "unknown"),
+                               "sudo systemctl enable --now %s" % unit, sev))
+    rc, failed = cmd_out(["systemctl", "list-units", "--failed", "--no-legend", "--plain"])
+    lines = [l for l in (failed or "").splitlines() if l.strip()]
+    hedron_failed = [l for l in lines if "hedron" in l or "scx" in l]
+    out.append(finding("units/failed", not hedron_failed,
+                       "%d failed unit(s)%s" % (len(lines), "; %d of them HedronOS: %s" % (len(hedron_failed), hedron_failed[0].split()[0]) if hedron_failed else ""),
+                       "systemctl status <unit>  ·  sudo journalctl -u <unit> -b", "error" if hedron_failed else "info"))
+    return out
+
+
+def check_tuning() -> list[Check]:
+    out: list[Check] = []
+    profile = read(path("/var/lib/hedron/tune/current-profile"), read(path("/etc/hedron/tune.conf"), "?")).splitlines()[0]
+    gov = {read(p, "?").strip() for p in _glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")}
+    sched = {read(p, "?").split("[")[-1].rstrip("]") for p in _glob("/sys/block/*/queue/scheduler")}
+    out.append(finding("tune/profile", True, "active profile: %s (governors: %s; IO: %s)"
+                       % (profile, ", ".join(sorted(g for g in gov if g != "?")) or "n/a",
+                          ", ".join(sorted(s for s in sched if s != "?")) or "n/a"), "", "info"))
+    cmdline = read("/proc/cmdline")
+    state = read(path("/sys/kernel/sched_ext/state"), "absent").strip()
+    ops = read(path("/sys/kernel/sched_ext/root/ops"), "")
+    out.append(finding("tune/sched_ext", True,
+                       "sched_ext state=%s%s" % (state, ", scheduler: " + ops.strip() if ops.strip() else ""),
+                       "an idle sched_ext state is normal when no game is running", "info"))
+    if state == "disabled" and which("scx_hedron"):
+        out.append(finding("tune/scx-not-loaded", True, "scx_hedron is installed but no scheduler is active",
+                           "hedron-tune apply --profile performance starts it; or `sudo scx_hedron`", "info"))
+    rc, gamemode = cmd_out(["hgm", "status"])
+    if rc == 0 and gamemode:
+        out.append(finding("tune/gamemode", True, (gamemode.strip().splitlines() or ["?"])[0][:90], "", "info"))
+    return out
+
+
+def check_store() -> list[Check]:
+    out: list[Check] = []
+    index = path(os.path.join(STATE, "store", "index.json"))
+    if not os.path.exists(index):
+        out.append(finding("store/index", False, "no store index at %s" % index,
+                           "sudo hstore update  (or: hstore seed --from-catalogue)", "error"))
+        return out
+    age = time.time() - os.path.getmtime(index)
+    doc = load_json(index) or {}
+    sig = index + ".sig"
+    verified = os.path.exists(sig)
+    out.append(finding("store/index-age", age < 7 * 86400,
+                       "index is %.1f days old, %d entries%s" % (age / 86400, len(doc.get("entries", []) or []),
+                                                                  "" if verified else " (UNSIGNED)"),
+                       "sudo hstore update", "warn" if age > 86400 * 7 else "info"))
+    if not verified:
+        out.append(finding("store/signature", False, "the index has no .sig next to it",
+                           "hstore verify  ·  build machines: hedron-store-key --sign", "warn"))
+    sel = load_json(path(os.path.join(STATE, "selected-apps.json")))
+    if sel:
+        apps = {a.get("app") for a in sel.get("apps", []) if a.get("selected")}
+        present = set()
+        if which("pacman"):
+            rc, o = cmd_out(["pacman", "-Qqe"])
+            present = set((o or "").split())
+        missing = sorted(a for a in apps if a not in present and a not in ("steam",))
+        out.append(finding("store/selection", not missing,
+                           "%d app(s) chosen at install, %d not installed" % (len(apps), len(missing))
+                           + (": " + ", ".join(missing[:5]) if missing else ""),
+                           "hstore install %s" % (" ".join(missing[:5]) or "…"), "warn"))
+        if "steam" in apps and which("pacman") and "steam" not in present:
+            out.append(finding("store/steam", False, "Steam was selected but is not installed",
+                               "hstore install steam  (or: sudo pacman -S steam steam-native-runtime)", "error"))
+    return out
+
+
+def check_bootloader() -> list[Check]:
+    out: list[Check] = []
+    esp = path("/boot")
+    loader = os.path.join(esp, "loader/loader.conf")
+    entries = sorted(os.listdir(os.path.join(esp, "loader/entries"))) if os.path.isdir(os.path.join(esp, "loader/entries")) else []
+    if os.path.exists(loader):
+        text = read(loader)
+        out.append(finding("boot/systemd-boot", "default" in text,
+                           "%d entry file(s), timeout=%s" % (len(entries),
+                                                             re.search(r"^timeout\s+(\S+)", text, re.M).group(1)
+                                                             if re.search(r"^timeout\s+(\S+)", text, re.M) else "?"),
+                           "", "info"))
+        gaming = [e for e in entries if "gaming" in e or "hedron" in e]
+        if not gaming:
+            out.append(finding("boot/entries", False, "no HedronOS entries in the bootloader",
+                               "sudo hedron-boot-entries.py --spec /etc/hedron/boot-entries.toml "
+                               "--outdir /boot/loader/entries", "error"))
+    elif os.path.exists(path("/etc/default/grub")):
+        out.append(finding("boot/grub", True, "GRUB install detected; entries come from grub-mkconfig", "", "info"))
+    else:
+        out.append(finding("boot/loader", False, "neither systemd-boot nor GRUB config found",
+                           "the installer writes one of these; run `sudo hedron-boot-entries.py ...`", "warn"))
+    if os.path.exists(path("/etc/plymouth/plymouthd.conf")) and "hedronos" not in read(path("/etc/plymouth/plymouthd.conf")):
+        out.append(finding("boot/plymouth", False, "Plymouth is not using the HedronOS theme",
+                           "sudo plymouth-set-default-theme -R hedronos", "warn"))
+    return out
+
+
+def check_desktop() -> list[Check]:
+    out: list[Check] = []
+    rc, o = cmd_out(["hedron-session", "which", "--json"])
+    if rc == 0 and o.strip():
+        try:
+            doc = json.loads(o)
+        except json.JSONDecodeError:
+            doc = {}
+        out.append(finding("desktop/session", bool(doc), "session: %s" % json.dumps(doc)[:120], "", "info"))
+    else:
+        out.append(finding("desktop/session", True, "no compositor session detected (%s)"
+                           % ("headless/VT" if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+                              else "hedron-session unavailable"), "", "info"))
+    if which("nvidia-smi"):
+        rc, o = cmd_out(["nvidia-smi", "--query-gpu=driver_version,name", "--format=csv,noheader"])
+        if rc == 0 and o.strip():
+            out.append(finding("desktop/nvidia-smi", True, "nvidia-smi: " + o.strip().splitlines()[0], "", "info"))
+    rc, o = cmd_out(["vulkaninfo", "--summary"])
+    if rc == 0:
+        devs = re.findall(r"deviceName\s*=\s*(.+)", o or "")
+        out.append(finding("desktop/vulkan", bool(devs),
+                           "Vulkan devices: %s" % ", ".join(d.strip() for d in devs[:3]) or "none reported",
+                           "no Vulkan device means games using DXVK will fall back to GL — install "
+                           "the mesa/vulkan packages for your GPU with `hedron-drivers apply`", "warn"))
+    return out
+
+
+def check_disk() -> list[Check]:
+    out: list[Check] = []
+    for mnt in ("/", "/home", "/var"):
+        p = path(mnt)
+        if not os.path.isdir(p):
+            continue
+        try:
+            st = os.statvfs(p)
+        except OSError:
+            continue
+        free = st.f_bavail * st.f_frsize
+        total = st.f_blocks * st.f_frsize
+        if total and free < 10 * 1024**3:
+            out.append(finding("disk/free-%s" % (mnt.strip("/") or "root"), False,
+                               "%s has %s free" % (mnt, human_bytes(free)),
+                               "games need room: 20 GiB minimum free for updates plus shaders", "error"))
+        else:
+            out.append(finding("disk/free-%s" % (mnt.strip("/") or "root"), True, "%s %s free of %s"
+                               % (mnt, human_bytes(free), human_bytes(total)), "", "info"))
+    mounts = read("/proc/mounts")
+    if "subvol=/@" in mounts:
+        out.append(finding("disk/btrfs-subvol", True, "root is a btrfs subvolume (@)", "", "info"))
+        if "compress" not in mounts:
+            out.append(finding("disk/btrfs-compress", False, "btrfs mounted without compression",
+                              "add compress=zstd to the / mount options in /etc/fstab", "warn"))
+    swap = read("/proc/swaps")
+    out.append(finding("disk/swap", bool(swap.strip().splitlines()[1:]) if swap else False,
+                       "swap present" if swap and len(swap.splitlines()) > 1 else "no swap: hibernation "
+                       "and memory pressure relief are both off",
+                       "sudo hedron-tune swap setup", "warn"))
+    if which("btrfs") and "subvolid=256" in mounts:
+        rc, o = cmd_out(["btrfs", "property", "get", "-s", path("/")])
+        if rc == 0 and o.strip():
+            out.append(finding("disk/btrfs-features", True, o.strip()[:80], "", "info"))
+    return out
+
+
+def check_power() -> list[Check]:
+    out: list[Check] = []
+    if os.path.exists(path("/sys/class/powercap/intel-rapl:0")):
+        text = read(path("/sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw"))
+        try:
+            out.append(finding("power/tdp", True, "package power cap is %.1f W" % (int(text) / 1e6), "", "info"))
+        except ValueError:
+            out.append(finding("power/tdp", True, "power cap unreadable", "", "info"))
+    governor = read(path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"), "?").strip()
+    if governor not in ("?", ""):
+        out.append(finding("power/governor", governor in ("performance", "schedutil", "ondemand", "conservative"),
+                           "cpu0 governor: %s" % governor,
+                           "hedron-tune apply --profile gaming (a powersave governor while gaming is the "
+                           "classic 30 % FPS loss)", "warn"))
+    for path_ in _glob("/sys/class/hwmon/hwmon*/name"):
+        name = read(path_, "").strip()
+        if name in ("k10temp", "coretemp", "zenpower", "acpitz", "nvidia"):
+            label = os.path.basename(os.path.dirname(path_))
+            raw = read(os.path.join(os.path.dirname(path_), "temp1_input"))
+            try:
+                temp = int(raw) / 1000.0
+            except ValueError:
+                continue
+            if temp > 95:
+                out.append(finding("power/temp-%s" % label, False, "%s reports %.0f °C" % (name, temp),
+                                   "check fan curves: hedron-tune fan profile  ·  clean the vents, really",
+                                   "error"))
+    return out
+
+
+def _glob(pattern: str) -> list[str]:
+    import glob as _g
+
+    return sorted(_g.glob(path(pattern)))
+
+
+CHECKS = (check_kernel, check_pci_and_driver, check_dmesg, check_initramfs, check_units, check_tuning,
+          check_store, check_bootloader, check_desktop, check_disk, check_power)
+
+
+def scan() -> list[Check]:
+    results: list[Check] = []
+    for fn in CHECKS:
+        try:
+            results.extend(fn())
+        except Exception as exc:  # noqa: BLE001 - one bad probe must not lose the other ten
+            results.append(finding("%s/crashed" % fn.__name__, False, "%s: %s" % (type(exc).__name__, exc),
+                                   "this is a bug in hedron-doctor; please file it with `hedron-doctor report`",
+                                   "error"))
+    return results
+
+
+# ------------------------------------------------------------------------- output
+def render(checks: list[Check], *, colour: bool = True) -> str:
+    from collections import OrderedDict
+
+    groups: "OrderedDict[str, list[Check]]" = OrderedDict()
+    for c in checks:
+        groups.setdefault(c.name.split("/")[0], []).append(c)
+    lines: list[str] = []
+    for group, items in groups.items():
+        lines.append("")
+        lines.append(group)
+        for c in items:
+            if c.ok and c.severity == "info" and not os.environ.get("HEDRON_DOCTOR_VERBOSE"):
+                # Green lines are noise unless you asked; the two that are not noise are printed
+                # anyway because "everything is fine" is only useful when you can see its edges.
+                if not c.name.startswith(("tune/", "power/tdp")):
+                    continue
+            mark = "✓" if c.ok else ("!" if c.severity == "warn" else "✗")
+            lines.append("  %s %-26s %s" % (mark, c.name, c.detail))
+            if not c.ok and c.hint:
+                lines.append("     fix: %s" % c.hint)
+    errors = [c for c in checks if not c.ok and c.severity == "error"]
+    warns = [c for c in checks if not c.ok and c.severity == "warn"]
+    head = "\nHedronOS doctor — %d check(s): %d error(s), %d warning(s)" % (len(checks), len(errors), len(warns))
+    tail = head + "\n"
+    if not errors and not warns:
+        tail += "  nothing to fix. Have a good session."
+    elif errors:
+        tail += "  %d thing(s) I can fix: run `sudo hedron-doctor fix --dry-run` first" % len(errors)
+    return "\n".join(lines) + tail
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    checks = scan()
+    os.makedirs(path(os.path.join(STATE, "doctor")), exist_ok=True)
+    if args.json:
+        doc = {"when": int(time.time()), "errors": sum(1 for c in checks if not c.ok and c.severity == "error"),
+               "warnings": sum(1 for c in checks if not c.ok and c.severity == "warn"),
+               "checks": [c.as_dict() for c in checks]}
+        text = json.dumps(doc, indent=1, sort_keys=True)
+        print(text)
+        if not args.no_save:
+            with open(path(os.path.join(STATE, "doctor/last-scan.json")), "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+        return 1 if doc["errors"] else 0
+    print(render(checks, colour=not args.no_colour))
+    if not args.no_save:
+        with open(path(os.path.join(STATE, "doctor/last-scan.json")), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"when": int(time.time()),
+                                 "checks": [c.as_dict() for c in checks]}, indent=1) + "\n")
+    return 1 if any(not c.ok and c.severity == "error" for c in checks) else 0
+
+
+FIX_ORDER = [
+    (r"^gpu/", ["hedron-drivers", "apply", "--rebind"]),
+    (r"^kernel/", ["pacman", "-Syu", "linux-hedron", "linux-hedron-headers"]),
+    (r"^boot/initramfs", ["mkinitcpio", "-P"]),
+    (r"^boot/entries", ["hedron-boot-entries.py", "--spec", "/etc/hedron/boot-entries.toml",
+                        "--outdir", "/boot/loader/entries", "--from-live"]),
+    (r"^units/", None),          # one command per unit, built below
+    (r"^store/", ["hstore", "update"]),
+    (r"^tune/", ["hedron-tune", "apply", "--profile", "gaming"]),
+    (r"^firmware/", ["pacman", "-S", "linux-firmware"]),
+]
+
+
+def cmd_fix(args: argparse.Namespace) -> int:
+    checks = scan()
+    broken = [c for c in checks if not c.ok and c.severity in ("error", "warn")]
+    if not broken:
+        print("nothing to fix")
+        return 0
+    print("%d finding(s). Planned actions (in this order):\n" % len(broken))
+    todo: list[list[str]] = []
+    for c in broken:
+        for pattern, cmd in FIX_ORDER:
+            if re.match(pattern, c.name):
+                if pattern == r"^units/":
+                    unit = c.name.split("/", 1)[1]
+                    if unit.endswith((".service", ".socket", ".timer")):
+                        todo.append(["systemctl", "enable", "--now", unit])
+                else:
+                    todo.append(list(cmd))
+                break
+        else:
+            if c.hint and c.hint.startswith(("sudo ", "hstore ", "systemctl ", "pacman ")):
+                todo.append(shlex.split(c.hint.replace("sudo ", "")))
+    seen = set()
+    for cmd in todo:
+        key = " ".join(cmd)
+        if key in seen:
+            continue
+        seen.add(key)
+        print("  # %s" % key)
+    if args.dry_run or not args.yes:
+        print("\n%s" % ("(dry run: nothing executed)" if args.dry_run
+                       else "pass --yes to run these; they need root"))
+        return 0
+    if os.geteuid() != 0:
+        print("\nthese commands need root — re-run with sudo", file=sys.stderr)
+        return 1
+    rc = 0
+    for cmd in todo:
+        proc = run(cmd, timeout=900)
+        rc = max(rc, proc.returncode)
+        print("  → exit %d" % proc.returncode)
+    print("\nre-scanning:\n")
+    return max(rc, cmd_scan(argparse.Namespace(json=False, no_save=False, no_colour=True)))
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    checks = scan()
+    import tarfile
+
+    out = args.out or "/tmp/hedronos-report-%s.tar.gz" % time.strftime("%Y%m%d-%H%M%S")
+    staging = out + ".d"
+    os.makedirs(staging, exist_ok=True)
+
+    def write(name: str, text: str) -> None:
+        with open(os.path.join(staging, name), "w", encoding="utf-8") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+
+    write("doctor.json", json.dumps({"when": time.strftime("%FT%T"),
+                                     "checks": [c.as_dict() for c in checks]}, indent=1))
+    write("cmdline", read("/proc/cmdline"))
+    write("uname", subprocess.run(["uname", "-a"], capture_output=True, text=True).stdout)
+    os_release = read(path("/etc/os-release"))
+    write("os-release", os_release)
+    write("mounts", mask(read("/proc/mounts")))
+    write("dmesg-tail", "\n".join(cmd_out(["dmesg"])[1].splitlines()[-400:]))
+    write("systemd-units", cmd_out(["systemctl", "list-units", "--all", "--no-pager"])[1])
+    write("pci", cmd_out(["lspci", "-nnk"])[1])
+    for f in ("driver-rules.toml", "features.json", "gpu-plans.json", "tune.conf", "session.conf",
+              "overlay.conf", "gamemode.conf", "replay.conf", "flowstate.conf", "store.toml"):
+        p = os.path.join(ETC, f)
+        if os.path.exists(path(p)):
+            shutil.copy2(path(p), os.path.join(staging, "etc-hedron-" + f))
+    if os.path.exists(path(os.path.join(STATE, "doctor/last-scan.json"))):
+        shutil.copy2(path(os.path.join(STATE, "doctor/last-scan.json")),
+                     os.path.join(staging, "last-scan.json"))
+    write("README.txt", "HedronOS bug report bundle, produced by `hedron-doctor report`.\n"
+                        "Masked: mount lines with credentials. Not included: your home directory, "
+                        "shell history,\nkeys, tokens, or anything under ~/.config except the files "
+                        "named above.\n"
+                        "Check it yourself before uploading: `tar tzf %s`.\n" % os.path.basename(out))
+    with tarfile.open(out, "w:gz") as tf:
+        for name in sorted(os.listdir(staging)):
+            tf.add(os.path.join(staging, name), arcname="report/" + name)
+    shutil.rmtree(staging, ignore_errors=True)
+    print("wrote %s (%s)" % (out, human_bytes(os.path.getsize(out))))
+    print("attach it to a GitHub issue; it contains no secrets by design (see report/README.txt)")
+    return 0
+
+
+def mask(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        lines.append(re.sub(r"(credentials=[^,\s]+)", r"credentials=***", line))
+    return "\n".join(lines)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    last = load_json(path(os.path.join(STATE, "doctor/last-scan.json")))
+    if not last:
+        print("no scan on record — run `hedron-doctor scan`")
+        return cmd_scan(argparse.Namespace(json=False, no_save=False, no_colour=False))
+    checks = [Check(c["name"], c["ok"], c["detail"], c.get("hint", ""), c.get("severity", "info"))
+              for c in last.get("checks", [])]
+    age = time.time() - last.get("when", 0)
+    print("(cached scan from %.1f h ago — re-run `hedron-doctor scan` after any change)\n" % (age / 3600))
+    print(render(checks))
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    print("HedronOS microbench — 2 minutes, no GPU assumptions. Compare before/after a change.\n")
+    import hashlib
+
+    t0 = time.perf_counter()
+    h = hashlib.sha256()
+    block = os.urandom(1 << 20)
+    n = 0
+    while time.perf_counter() - t0 < args.crypto_seconds:
+        h.update(block)
+        n += 1
+    dt = time.perf_counter() - t0
+    mib_s = (n * (1 << 20)) / dt / (1 << 20)
+    print("  sha256 single-thread      %8.0f MiB/s   (%.1f s)" % (mib_s, dt))
+
+    t0 = time.perf_counter()
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(prefix="hedron-bench-")
+    block = os.urandom(1 << 20)
+    t0 = time.perf_counter()
+    for _ in range(max(1, args.disk_mib)):
+        os.write(fd, block)
+    os.fsync(fd)
+    dt1 = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    os.lseek(fd, 0, os.SEEK_SET)
+    got = 0
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            break
+        got += len(chunk)
+    os.close(fd)
+    os.unlink(tmp)
+    dt2 = time.perf_counter() - t0
+    print("  disk write  (%d MiB)       %8.0f MiB/s" % (args.disk_mib, args.disk_mib / dt1))
+    print("  disk read   (%d MiB)       %8.0f MiB/s" % (got // (1 << 20), (got / dt2) / (1 << 20)))
+
+    sched = read(path("/sys/kernel/sched_ext/state"), "absent").strip()
+    print("  sched_ext                 %s" % sched)
+    if which("hedron-latency"):
+        rc, o = cmd_out(["hedron-latency", "--ms", str(args.latency_ms)])
+        print("  wakeup latency            %s" % ((o or "").strip().splitlines() or ["unavailable"])[-1][:90])
+    else:
+        print("  wakeup latency            (hedron-latency not installed)")
+    return 0
+
+
+def verifier_path() -> str:
+    """Where the distro's own gate lives: installed first, then the checkout it was run from."""
+    for cand in ("/usr/lib/hedron/hedronos-verify", os.path.join(_HERE, "hedronos-verify")):
+        if os.path.isfile(cand):
+            return cand
+    d = _HERE
+    for _ in range(9):
+        d = os.path.dirname(d)
+        for rel in ("hedronos/tools/hedronos-verify", "tools/hedronos-verify"):
+            cand = os.path.join(d, rel)
+            if os.path.isfile(cand):
+                return cand
+        if os.path.isdir(os.path.join(d, ".git")):
+            break
+    return ""
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    gate = verifier_path()
+    if not gate:
+        print("hedron-doctor: the verification gate is not installed here.\n"
+              "  on an installed system it lives at /usr/lib/hedron/hedronos-verify;\n"
+              "  in the source tree:  python3 hedronos/tools/hedronos-verify --root hedronos", file=sys.stderr)
+        return 1
+    cmd = [sys.executable, gate, "--root", ROOT or os.path.dirname(os.path.dirname(gate)), "--json"]
+    return subprocess.call(cmd)
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    p = path(os.path.join(STATE, "doctor/last-scan.json"))
+    if not os.path.exists(p):
+        print("no scans yet")
+        return 1
+    doc = load_json(p) or {}
+    print("last scan: %s  (%d checks)" % (time.strftime("%F %T", time.localtime(doc.get("when", 0))),
+                                          len(doc.get("checks", []))))
+    for c in doc.get("checks", []):
+        if not c.get("ok"):
+            print("  %-28s %s" % (c["name"], c.get("detail", "")[:70]))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-doctor", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="machine-readable output")
+    common.add_argument("--no-colour", action="store_true", help=argparse.SUPPRESS)
+    common.add_argument("-v", "--verbose", action="store_true", help="also print the checks that passed")
+    for flag in ("--json", "--no-colour"):
+        ap.add_argument(flag, action="store_true", help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd")
+    p = sub.add_parser("scan", parents=[common], help="run every check (and cache it for `status`)")
+    p.add_argument("--no-save", action="store_true")
+    p.set_defaults(func=cmd_scan)
+    p = sub.add_parser("status", parents=[common], help="cached summary (or scan if there is none)")
+    p.set_defaults(func=cmd_status)
+    p = sub.add_parser("fix", parents=[common], help="the repairs, in dependency order")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--yes", action="store_true")
+    p.set_defaults(func=cmd_fix)
+    p = sub.add_parser("report", parents=[common], help="redacted tarball for a bug report")
+    p.add_argument("--out", default=None)
+    p.set_defaults(func=cmd_report)
+    p = sub.add_parser("bench", parents=[common], help="crypto + disk + scheduler + latency numbers")
+    p.add_argument("--crypto-seconds", type=float, default=6.0)
+    p.add_argument("--disk-mib", type=int, default=256)
+    p.add_argument("--latency-ms", type=int, default=3000)
+    p.set_defaults(func=cmd_bench)
+    p = sub.add_parser("history", parents=[common], help="what the last scan said")
+    p.set_defaults(func=cmd_history)
+    p = sub.add_parser("verify", parents=[common], help="the distro's file/unit promises")
+    p.set_defaults(func=cmd_verify)
+    args = ap.parse_args(argv)
+    if args.verbose:
+        os.environ["HEDRON_DOCTOR_VERBOSE"] = "1"
+    if args.cmd is None:
+        args.cmd = "status"
+        args.func = cmd_status
+    if args.cmd == "scan":
+        args.no_save = getattr(args, "no_save", False)
+    if args.cmd in ("status",) and args.json:
+        args.no_colour = True
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

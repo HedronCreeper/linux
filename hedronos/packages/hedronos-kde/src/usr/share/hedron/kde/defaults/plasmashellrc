@@ -1,0 +1,10 @@
+# Plasma shell: no startup animation, no widgets that sample the GPU every 200 ms.
+[PlasmaTransientsConfig]
+fileDialogWidth=640
+showOnMouseEnter=false
+
+[General]
+# The annual "why is my FPS worse today" ticket is a Plasma widget polling sensors. We ship one
+# applet that reads the shared sample file and nothing else may poll.
+AnimationDuration=0
+popUpNotify=3

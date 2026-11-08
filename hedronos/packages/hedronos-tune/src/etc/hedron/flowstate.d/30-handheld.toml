@@ -1,0 +1,43 @@
+# FlowState: handheld — the deck profile (Steam Deck-class hardware).
+# SPDX-License-Identifier: MIT
+#
+# A handheld is a thermal-budget machine: the goal is a *flat* frame time at a target FPS,
+# not a peak. So we cap package power, keep the GPU from boosting into a throttling
+# collapse, and preserve deep idle states when a scene is simple.
+[profile]
+name = "handheld"
+inherits = "gaming"
+note = "Power-capped and fan-targeted: consistent frame time beats peak FPS on battery."
+
+[cpu]
+governor = "conservative"
+energy_performance_preference = "balance_performance"
+boost = true
+disable_idle_states = [1]
+
+[sysctl]
+"vm.dirty_expire_centisecs" = 1000
+"net.core.busy_poll" = 0
+"net.core.busy_read" = 0
+"vm.watermark_boost_factor" = 0
+
+[gpu]
+power_profile = "manual"
+power_cap = "15000000"
+gpu_clock_lock = "auto"
+"pp_sclk_clocks_limits_max_khz" = 1800000
+
+[sysfs]
+"sys/class/power_supply/BAT*/status" = "auto"
+"sys/class/hwmon/hwmon*/pwm1_enable" = 1
+
+[sched]
+scheduler = "hedron"
+
+[env]
+GAMESCOPE_LIMIT_POWER = "15"
+MANGOHUD_CONFIG = "font_size=22,background_alpha=0.4,vsync=1,fcat=2"
+
+[extra]
+gate = { mode = "skip", command = "the deck's physical power button still suspends in 3 s; hold it longer to force off" }
+anti-throttle = { mode = "command", command = "hedron-thermal target 78 || true" }

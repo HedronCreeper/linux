@@ -1,0 +1,97 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/features.json",
+  "/etc/os-release"
+ ],
+ "conflicts": [],
+ "depends": [
+  "filesystem",
+  "sed",
+  "grep",
+  "diffutils",
+  "systemd-libs",
+  "openssl"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/hedron",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/python3.13/site-packages",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/system",
+  "/usr/lib/tmpfiles.d",
+  "/usr/share",
+  "/usr/share/hedron",
+  "/usr/share/hedron/branding",
+  "/usr/share/libalpm",
+  "/usr/share/libalpm/hooks"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-release-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/hedron/",
+  "/etc/hedron/features.json",
+  "/etc/hedron/release.json",
+  "/etc/issue",
+  "/etc/os-release",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-notify",
+  "/usr/bin/hedronctl",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedron-firstboot.py",
+  "/usr/lib/hedron/hedron-rollback.py",
+  "/usr/lib/python3.13/site-packages/hedronlib",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/system/",
+  "/usr/lib/systemd/system/hedron-firstapps.service",
+  "/usr/lib/systemd/system/hedron-firstapps.timer",
+  "/usr/lib/systemd/system/hedron-firstboot.service",
+  "/usr/lib/systemd/system/hedron-rollback-autosnap.service",
+  "/usr/lib/systemd/system/hedron-rollback-autosnap.timer",
+  "/usr/lib/systemd/system/hedron-rollback-snap@.service",
+  "/usr/lib/tmpfiles.d/",
+  "/usr/lib/tmpfiles.d/hedron-release.conf",
+  "/usr/share/",
+  "/usr/share/hedron/",
+  "/usr/share/hedron/branding/",
+  "/usr/share/hedron/branding/issue",
+  "/usr/share/libalpm/",
+  "/usr/share/libalpm/hooks/",
+  "/usr/share/libalpm/hooks/hedron-rollback.hook"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-release",
+ "optional": [
+  "btrfs-progs",
+  "snapper"
+ ],
+ "provides": [
+  "hedronos-base"
+ ],
+ "release": "1",
+ "services_enable": [
+  "hedron-firstboot.service",
+  "hedron-firstapps.timer",
+  "hedron-rollback-autosnap.timer"
+ ],
+ "size": 0,
+ "summary": "HedronOS release files, hedronctl, first-boot orchestration and rollback snapshots",
+ "units": [
+  "usr/lib/systemd/system/hedron-firstboot.service",
+  "usr/lib/systemd/system/hedron-firstapps.service",
+  "usr/lib/systemd/system/hedron-firstapps.timer",
+  "usr/lib/systemd/system/hedron-rollback-snap@.service",
+  "usr/lib/systemd/system/hedron-rollback-autosnap.service",
+  "usr/lib/systemd/system/hedron-rollback-autosnap.timer"
+ ],
+ "version": "1.0.0"
+}

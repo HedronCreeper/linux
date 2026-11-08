@@ -1,0 +1,28 @@
+{
+  "name": "HedronOS",
+  "product": "HedronOS Halcyon",
+  "version": "1.0.0",
+  "codename": "Halcyon",
+  "tagline": "A Linux distribution built around the frame you are looking at.",
+  "accent": "#5ad2a0",
+  "accent_dim": "#2f7f63",
+  "background": "#0b0f14",
+  "foreground": "#e8eef2",
+  "danger": "#e8564f",
+  "warn": "#e8b23a",
+  "font_ui": "Inter, Noto Sans, sans-serif",
+  "font_mono": "JetBrains Mono, Cascadia Code, monospace",
+  "wallpapers": {
+    "duality": "/usr/share/hedron/wallpapers/duality.svg",
+    "nadir": "/usr/share/hedron/wallpapers/nadir.svg",
+    "terminus": "/usr/share/hedron/wallpapers/terminus.svg",
+    "umbra": "/usr/share/hedron/wallpapers/umbra.svg"
+  },
+  "logo": "/usr/share/icons/hicolor/scalable/apps/hedron-os.svg",
+  "docs": "https://github.com/HedronCreeper/linux/tree/master/hedronos",
+  "bugzilla": "https://github.com/HedronCreeper/linux/issues",
+  "store": "hstore",
+  "first_step": "hedron-doctor status",
+  "gaming_note": "Steam, Proton, gamemode and the GPU driver are configured before your first login.",
+  "hdr_note": "HDR is off by default; enable it per-session with `hedron-session hdr on`."
+}

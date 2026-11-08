@@ -1,0 +1,191 @@
+# HedronOS package sets — what each profile actually installs.
+# SPDX-License-Identifier: MIT
+#
+# `tools/pkgset.py` expands this into a flat, deduplicated install list.  Design rules:
+#   * `groups` are additive; a profile picks groups, `exclude` subtracts, `only` isolates.
+#   * anything under [hedron] is built from packages/*/ in this repo, never downloaded.
+#   * `conflicts` are enforced at resolve time so we fail loudly instead of half-installing.
+#   * estimates drive the ISO size report; they are approximate on purpose (GiB per group).
+
+[meta]
+version = 3
+base_repo = "extra"
+# Packages every single profile installs, including `core`. These are the floor: an
+# install that cannot provide them is not a HedronOS install.
+mandatory = [
+  "linux-hedron", "linux-firmware", "base", "base-devel", "shellcheck",
+  "systemd", "systemd-ukify", "polkit", "dbus", "pipewire", "wireplumber",
+  "networkmanager", "iwd", "bluez", "udisks2", "accountsservice", "openssh",
+  "sudo", "vim", "nano", "git", "curl", "wget", "rsync", "tar", "zstd", "xz",
+  "btrfs-progs", "dosfstools", "e2fsprogs", "exfatprogs", "ntfs-3g", "dos2unix",
+  "smartmontools", "lm_sensors", "acpi", "upower", "usbutils", "pciutils",
+]
+
+# ------------------------------------------------------------------- hedron-owned
+[hedron]
+core = ["hedronos-release", "hedronos-drivers", "hedronos-tune", "hedronos-store",
+        "hedronos-firstsetup", "hedronos-branding", "hedronos-doctor"]
+gaming = ["hedronos-gamemode", "hedronos-capture", "hedronos-overlay", "hedronos-vitals"]
+handheld = ["hedronos-handheld"]
+session = ["hedronos-session"]
+
+# ----------------------------------------------------------------------- groups
+[groups.base-desk]
+note = "Display server + session plumbing. Wayland only: X11 stays available through XWayland."
+packages = ["wayland", "libx11", "xcb-util-cursor", "xorg-xwayland", "xorg-server",
+            "xorg-xdpyinfo", "vulkan-icd-loader", "mesa", "lib32-mesa", "lib32-vulkan-icd-loader",
+            "vulkan-tools", "glslang", "spirv-tools", "libva-utils", "vdpauinfo", "ocl-icd"]
+estimate_mib = 340
+
+[groups.plasma]
+note = "KDE Plasma 6 on Wayland: per-monitor scaling, VRR, HDR, and the hedron KCM module."
+packages = ["plasma-meta", "plasma-workspace", "plasma-nm", "plasma-pa", "plasma-thunderbolt",
+            "sddm", "kwin", "polkit-kde-agent", "dolphin", "dolphin-plugins", "konsole", "yakuake",
+            "kate", "ark", "gwenview", "okular", "systemsettings", "print-manager", "apper",
+            "bluedonk", "kde-gtk-config", "xdg-desktop-portal-kde", "qt6-wayland"]
+hedron = ["hedronos-kde"]
+estimate_mib = 1450
+
+[groups.gnome]
+note = "GNOME 49 path (used by the studio profile when the user prefers it)."
+packages = ["gnome-shell", "gnome-control-center", "nautilus", "gedit", "gnome-terminal",
+            "gnome-settings-daemon", "gdm", "xdg-desktop-portal-gnome", "mutter"]
+estimate_mib = 1300
+
+[groups.gaming]
+note = "The reason this distro exists."
+packages = ["steam", "steam-native-runtime", "lib32-mesa", "gamemode", "mangohud",
+            "goverlay", "lutris", "heroic-games-launcher", "gamescope", "vkd3d", "lib32-vkd3d",
+            "dxvk-mingw", "proton-ge-custom", "prime-run", "primeshare", "openrgb",
+            "input-remapper", "anti-cheat-launcher", "retroarch", "mednafen", "duckstation",
+            "rpcs3", "shadps4", "melonDS", "cemu-qt5", "yuzu-early-access", "sunshine", "moonlight"]
+hedron = ["hedronos-gamemode", "hedronos-capture", "hedronos-overlay", "hedronos-vitals"]
+estimate_mib = 2600
+
+[groups.proton-deps]
+note = "32/64-bit runtime pieces Proton needs. Installed with `gaming`, listed separately so `hedron-doctor` can diagnose a broken prefix."
+packages = ["lib32-gcc-libs", "lib32-gettext", "lib32-zlib", "lib32-fontconfig", "lib32-libpcap",
+            "lib32-libxml2", "lib32-lcms2", "lib32-libxslt", "lib32-openal", "lib32-gnutls",
+            "lib32-libva", "lib32-libvdpau", "lib32-gst-plugins-base-libs", "lib32-nss",
+            "giflib", "lcms2", "sdl2", "sdl3", "game-devices-udev"]
+estimate_mib = 260
+
+[groups.handheld]
+note = "Deck-ish input, suspend, power and the gamescope session."
+packages = ["steamos-manager", "mcs-controller", "decky-loader", "ryujinx", "tmda"]
+hedron = ["hedronos-handheld", "hedronos-session"]
+estimate_mib = 220
+
+[groups.store]
+packages = ["flatpak", "appimagelauncher", "bubblewrap", "xdg-user-dirs", "python", "python-dbus",
+            "python-gobject", "libadwaita", "ostree"]
+hedron = ["hedronos-store"]
+estimate_mib = 380
+
+[groups.tune]
+packages = ["power-profiles-daemon", "cpupower", "zram-generator", "haveged", "irqbalance",
+            "thermald", "corectrl", "nvtop", "bpytop"]
+hedron = ["hedronos-tune", "hedronos-doctor"]
+estimate_mib = 190
+
+[groups.audio]
+packages = ["pipewire-alsa", "pipewire-jack", "pipewire-pulse", "wireplumber", "cantata",
+            "cmus", "spotify", "deadbeef", "pavucontrol", "easyeffects", "hirte"]
+estimate_mib = 260
+
+[groups.creative]
+packages = ["blender", "krita", "gimp", "darktable", "inkscape", "audacity", "ffmpeg",
+            "obs-studio", "kdenlive", "digikam", "shotcut", "qview", "rawtherapee"]
+estimate_mib = 1900
+
+[groups.office]
+packages = ["libreoffice-fresh", "thunderbird", "evolution", "transmission-gtk", "firefox",
+            "thunderbird-i18n", "huginn", "zathura", "zathura-pdf-mupdf"]
+estimate_mib = 1100
+
+[groups.dev]
+packages = ["code", "git-lfs", "docker", "podman", "distcc", "cmake", "meson", "ninja", "rust",
+            "go", "nodejs-lts-jod", "deno", "python-poetry", "gcc", "clang", "lldb", "gdb", "strace"]
+estimate_mib = 3200
+
+[groups.network]
+packages = ["networkmanager-openvpn", "networkmanager-strongswan", "networkmanager-l2tp",
+            "openresolv", "dnsmasq", "nftables", "tailscaled", "wireguard-tools"]
+estimate_mib = 90
+
+[groups.print-scan]
+packages = ["cups", "cups-pk-helper", "avahi", "sane", "hplip", "gutenprint", "foomatic-db"]
+estimate_mib = 240
+
+[groups.bluetooth-extra]
+packages = ["bluez-utils", "blueberry", "pipewire-bluez5", "obexd"]
+estimate_mib = 40
+
+# --------------------------------------------------------------------- profiles
+[profiles.gamerte]
+description = "Gaming-first desktop. Plasma, everything pre-cached, drivers auto-installed."
+groups = ["base-desk", "plasma", "gaming", "proton-deps", "store", "tune", "network", "print-scan", "bluetooth-extra"]
+default_apps = ["steam", "mangohud", "goverlay", "lutris", "heroic-games-launcher", "obs-studio",
+                "discord", "spiderbot", "openrgb", "input-remapper", "corectrl", "moonlight"]
+only_hedron_units = ["hedron-flowstate", "hedron-gamemoded", "hedron-replayd", "hedron-osd"]
+
+[profiles.desktop]
+description = "The family machine. Same kernel and driver smarts, office + creative instead of a game library."
+groups = ["base-desk", "plasma", "store", "office", "creative", "audio", "tune", "network", "print-scan", "bluetooth-extra"]
+default_apps = ["firefox", "thunderbird", "libreoffice-fresh", "spotify", "gimp", "vlc", "steam", "lutris"]
+
+[profiles.handheld]
+description = "Handhelds: gamescope session, power caps, controller-first UI."
+groups = ["base-desk", "gaming", "proton-deps", "handheld", "store", "tune"]
+default_apps = ["steam", "mangohud", "emulationstation-de", "retroarch", "moonlight"]
+
+[profiles.studio]
+description = "Creator workstation with a game library on the side."
+groups = ["base-desk", "plasma", "creative", "audio", "store", "tune", "network", "print-scan"]
+default_apps = ["blender", "krita", "darktable", "obs-studio", "kdenlive", "audacity", "ardour"]
+
+[profiles.core]
+description = "No desktop. Kiosk, game-stream node, or a base for your own spin."
+groups = []
+default_apps = []
+
+# ------------------------------------------------------------------ constraints
+[[conflicts]]
+a = "nvidia-open-dkms"
+b = "nvidia-470xx-dkms"
+why = "two vendor kernel modules of the same family would fight for the device"
+
+[[conflicts]]
+a = "xf86-video-nouveau"
+b = "nvidia-open-dkms"
+why = "nouveau must be blacklisted when the vendor module is used"
+
+[[conflicts]]
+a = "mesa-totem"
+b = "mesa"
+why = "never seen in the wild, kept to prove the conflict path is exercised"
+
+[[conflicts]]
+a = "power-profiles-daemon"
+b = "TLP"
+why = "two CPU governor owners is a guaranteed fight; HedronOS uses FlowState + PPD, so TLP is excluded by default"
+
+[excluded_by_default]
+# Installed upstream, harmful to frame pacing, and the usual cause of "Linux stutters".
+packages = ["TLP", "auto-cpufreq", "anacron", "mlocate", "xdg-desktop-portal-gnome"]
+note = "TLP/auto-cpufreq override governors and are excluded from every profile; FlowState owns power policy unless the user opts back in with `hedron-tune allow-third-party-power`."
+
+[variant.dvd]
+note = "everything pre-fetched; install with the network unplugged"
+add_groups = []
+strip = ["/var/cache/pacman/pkg"]
+
+[variant.net]
+note = "small image; the installer fetches from the mirrors"
+max_iso_mib = 1400
+skip_prefetch = true
+
+[variant.uc]
+note = "ultra-capable: every GPU branch, SDKs, both kernels"
+add_groups = ["dev", "creative"]
+add_packages = ["linux-hedron-rt", "cuda", "rocm-opencl-sdk", "nsight-viewer", "vkcube", "vkd3d-proton-git"]

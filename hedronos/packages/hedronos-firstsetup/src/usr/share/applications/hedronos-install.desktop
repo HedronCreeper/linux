@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=Install HedronOS
+GenericName=Installer
+Comment=Erase a disk or shrink into free space, with your app selection already made
+Exec=sh -c 'hedronos-install --selection /tmp/hedron-selection.json || hedronos-install'
+Terminal=true
+Icon=drive-harddisk
+Categories=System;FileSystem;
+Keywords=install;setup;partition;disk;
+StartupNotify=true

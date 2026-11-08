@@ -1,0 +1,71 @@
+[General]
+Description=HedronOS Light — generated from /usr/share/hedron/branding/branding.json
+ColorSchemeName=HedronOS Light
+dark=0.000000
+shadeWindow=255
+intensity=1.000000
+contrast=1.000000
+transparency=true
+customColors=2F7F63
+
+[Background]
+Color=242 244 246
+ColorIntensity=100
+Opacity=1.000000
+WallpaperOverlay=0.000000
+
+[View]
+Background=242 244 246
+Foreground=18 22 27
+SelectionBackground=47 127 99
+SelectionForeground=255 255 255
+HoverColor=47 127 99
+FocusColor=47 127 99
+
+[Button]
+Background=242 244 246
+Foreground=18 22 27
+Hover=47 127 99
+Focus=47 127 99
+PositiveBackground=47 127 99
+NegativeBackground=232 86 79
+
+[Selection]
+Background=47 127 99
+Foreground=255 255 255
+Focus=47 127 99
+Hover=47 127 99
+
+[Tooltip]
+Background=242 244 246
+Foreground=18 22 27
+
+[Window]
+Background=242 244 246
+Foreground=18 22 27
+ActiveBackground=242 244 246
+ActiveForeground=18 22 27
+InactiveBackground=242 244 246
+InactiveForeground=18 22 27
+Hover=47 127 99
+
+[FormItem]
+Label=18 22 27
+TextLabel=18 22 27
+FieldBackground=242 244 246
+FieldForeground=18 22 27
+StaticText=18 22 27
+Hover=47 127 99
+MandatoryIndicator=232 178 58
+
+[WM]
+activeBackground=242 244 246
+activeForeground=18 22 27
+activeTitleBackground=242 244 246
+inactiveBackground=242 244 246
+inactiveForeground=18 22 27
+activeFrame=47 127 99
+inactiveFrame=18 22 27
+activeBlendMode=0
+inactiveBlendMode=0
+resizeOnDrag=false

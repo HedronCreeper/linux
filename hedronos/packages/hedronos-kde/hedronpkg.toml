@@ -1,0 +1,53 @@
+# hedronos-kde — Plasma presentation layer. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-kde"
+version = "1.0.0"
+release = "1"
+summary = "HedronOS KDE layer: colour schemes, compositor defaults, applier with revert, SDDM theme, KWin keys"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["any"]
+groups = ["hedronos"]
+
+[depends]
+runtime = ["bash", "python", "hedronos-branding", "hedronos-vitals"]
+build = ["python"]
+check = ["python"]
+optional = ["plasma-workspace", "kwin", "sddm", "breeze", "breeze-gtk", "oxygen", "konsole", "dolphin",
+            "yakuake", "kdeplasma-applets-virtual-keyboard"]
+
+[depends.patches]
+# Nothing is patched into KDE: everything here is config. The two upstream bugs worth knowing
+# about (fullscreen unredirect flicker, fractional scaling double-scale) are handled by
+# kwinrc/env choices instead of a delta we would have to carry forever.
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-kde-apply" = "0755"
+"usr/share/color-schemes/HedronOS.colors" = "0644"
+"usr/share/color-schemes/HedronOS-light.colors" = "0644"
+"usr/share/hedron/kde/defaults/kwinrc" = "0644"
+"usr/share/hedron/kde/defaults/kdeglobals" = "0644"
+"usr/share/hedron/kde/defaults/kglobalshortcutsrc" = "0644"
+"usr/share/hedron/kde/defaults/kcminputrc" = "0644"
+"usr/share/hedron/kde/defaults/plasmashellrc" = "0644"
+"usr/share/kwin/scripts/hedron-keys/metadata.json" = "0644"
+"usr/share/kwin/scripts/hedron-keys/main.js" = "0644"
+"usr/share/sddm/themes/hedronos/theme.conf" = "0644"
+"usr/share/sddm/themes/hedronos/Main.qml" = "0644"
+"etc/environment.d/99-hedron-kde.conf" = "0644"
+"etc/xdg/autostart/hedron-kde-apply.desktop" = "0644"
+"usr/share/applications/hedron-desktop-settings.desktop" = "0644"
+"README.md" = "0644"
+
+[files]
+preserve = ["/etc/environment.d/99-hedron-kde.conf", "/etc/xdg/autostart/hedron-kde-apply.desktop"]
+trigger = [{ path = "/usr/share/color-schemes", install = "/usr/bin/update-desktop-database", message = "refresh the desktop database so the new colour schemes appear", needs = "/usr/bin/update-desktop-database" }]
+
+[services]
+enable = []
+
+[tests]
+modules = ["tests/test_kde_apply.py"]

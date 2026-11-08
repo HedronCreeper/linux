@@ -1,0 +1,18 @@
+[Unit]
+Description=HedronOS FlowState: a game claimed (%i)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=hedron-flowstate.service
+Wants=hedron-flowstate.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Started by hgm (and by gamemoderun) on a claim. The daemon does the actual work; this
+# unit exists so a claim leaves a trace in the journal and in `systemctl --user list-units`,
+# and so `systemctl stop hedron-flowstate-engage@*` is a supported way to force a release.
+#
+# It is *not* a security boundary and it deliberately does not touch sysctls: the system
+# daemon (running as root) is the only thing allowed to write /proc/sys, which is why this
+# is a user unit that just pokes a socket.
+ExecStart=/usr/bin/sh -c 'printf "profile gaming claim %s\\n" "%i" | socat - UNIX-CONNECT:/run/user/%U/hedron/flowstate.sock 2>/dev/null || hedron-tune game-on --note "%i"'
+ExecStop=/usr/bin/sh -c 'test "${HEDRON_ENGAGE_STOP:-1}" = 1 && hedron-tune game-off || true'

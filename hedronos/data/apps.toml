@@ -1,0 +1,894 @@
+# HedronOS curated application catalog
+# SPDX-License-Identifier: MIT
+#
+# Read by the pre-install picker (`hedron-firstsetup`) and by Hedron Store after install.
+# `locked = true` means the installer shows it ticked and greyed out — that is how Steam
+# is guaranteed present on every gaming profile without forcing it on `core`.
+#
+# Rules enforced by tools/hedronos-verify (see catalog.validate()):
+#   id is kebab-case · summary < 120 chars · category exists below · positive size_mib
+#   at least one provider · reverse-DNS flatpak id · requires/conflicts point at real ids
+
+[meta]
+version = 7
+updated = "2026-11-07"
+default_repo = "extra"
+# Anything not listed here is fetched from Flathub; the store marks it "community".
+default_remote = "flathub"
+
+# ------------------------------------------------------------------------ categories
+[[category]]
+id = "gaming"
+name = "Gaming & launchers"
+icon = "input-gaming"
+blurb = "Stores, launchers, mods, overlays. Steam is pre-selected on every gaming profile."
+
+[[category]]
+id = "emulation"
+name = "Emulation"
+icon = "applications-games"
+blurb = "From CRT-era consoles to Switch/PS4 class."
+
+[[category]]
+id = "streaming"
+name = "Streaming & capture"
+icon = "video-display"
+blurb = "Twitch/YouTube, Sunshine/Moonlight, recording."
+
+[[category]]
+id = "browsers"
+name = "Web browsers"
+icon = "web-browser"
+blurb = "Pick one primary; HedronOS preselects Firefox for its media code paths."
+
+[[category]]
+id = "communication"
+name = "Chat & voice"
+icon = "internet-chat"
+blurb = "Discord, Telegram, Matrix, mail."
+
+[[category]]
+id = "office"
+name = "Productivity"
+icon = "office-calendar"
+blurb = "Documents, spreadsheets, notes, calendars."
+
+[[category]]
+id = "creative"
+name = "Create"
+icon = "graphics-viewer-editor"
+blurb = "3D, painting, video, photo, DAW."
+
+[[category]]
+id = "media"
+name = "Movies & music"
+icon = "multimedia-player"
+blurb = "Players, libraries, codecs."
+
+[[category]]
+id = "development"
+name = "Code"
+icon = "application-x-development-file"
+blurb = "Editors, toolchains, containers."
+
+[[category]]
+id = "utilities"
+name = "Utilities"
+icon = "accessories-utilities"
+blurb = "The everyday small tools."
+
+[[category]]
+id = "system"
+name = "System & files"
+icon = "computer"
+blurb = "Terminal, files, disk, snapshots."
+
+[[category]]
+id = "security"
+name = "Security & privacy"
+icon = "security-high"
+blurb = "Firewalls, password managers, VPN."
+
+[[category]]
+id = "hardware"
+name = "Hardware & drivers"
+icon = "preferences-desktop-display"
+blurb = "Fan curves, RGB, monitors, firmware."
+
+[[category]]
+id = "network"
+name = "Network"
+icon = "network-workgroup"
+blurb = "Sharing, downloads, remote access."
+
+# --------------------------------------------------------------------------- bundles
+[bundles.gaming-essentials]
+name = "Gaming essentials"
+blurb = "Everything to play what you own, today"
+apps = ["steam", "heroic", "lutris", "mangohud-ui", "protonplus", "gamemode-ui", "obs", "discord", "vlc", "keeper"]
+
+[bundles.everyday]
+name = "Everyday desktop"
+blurb = "Browser, mail, office, media, chat"
+apps = ["firefox", "thunderbird", "libreoffice", "vlc", "telegram", "spotify", "gimp", "org-manager"]
+
+[bundles.creator]
+name = "Creator suite"
+blurb = "3D, paint, video, photo, audio"
+apps = ["blender", "krita", "darktable", "kdenlive", "obs", "audacity", "ardour", "inkscape"]
+
+[bundles.dev]
+name = "Developer box"
+blurb = "Editor, containers, language toolchains"
+apps = ["vscode", "podman", "gitui", "term-fancy", "direnv"]
+
+[bundles.offline]
+name = "Nothing but the basics"
+blurb = "For kiosk / headless installs"
+apps = ["term-fancy", "htop", "syncthing"]
+
+# ------------------------------------------------------------------------------ apps
+# ---- gaming ------------------------------------------------------------ locked first
+[[app]]
+id = "steam"
+name = "Steam"
+category = "gaming"
+summary = "Valve's store, Proton, Big Picture and the Steam Runtime — installed with the native runtime too"
+description = "HedronOS treats Steam as a system component rather than an app: the Proton runtime, the native runtime libraries, the udev rules for controllers, and the GameMode hooks are installed together, and the launch options get `hedron-run` injected so FlowState engages on the first frame. Instant Replay and the in-game overlay bind to it automatically."
+locked = true
+gaming = true
+tier = "verified"
+size_mib = 1250
+pacman = ["steam", "steam-native-runtime", "lib32-mesa", "vulkan-radeon", "gamemode", "game-devices-udev"]
+profiles = ["gamerte", "handheld", "desktop", "studio"]
+post_install = ["hedron-gamemode register --steam-default", "hedron-store hint steam-tweaks"]
+sandbox = "none"
+icon = "steam"
+notes = "Proton-GE and Wine-GE are offered by Hedron Store as separate downloads; we never patch your prefix."
+
+[[app]]
+id = "heroic"
+name = "Heroic Games Launcher"
+category = "gaming"
+summary = "Epic, GOG and Amazon Games in one open-source launcher"
+tier = "verified"
+size_mib = 180
+flatpak = "com.heroicgameslauncher.hgl"
+gaming = true
+profiles = ["gamerte", "handheld"]
+requires = ["steam"]
+icon = "heroic"
+
+[[app]]
+id = "lutris"
+name = "Lutris"
+category = "gaming"
+summary = "Install scripts for anything that runs on Wine, plus non-Steam wrappers"
+tier = "verified"
+size_mib = 90
+pacman = ["lutris", "wine-gecko", "winetricks"]
+gaming = true
+profiles = ["gamerte", "desktop", "handheld"]
+icon = "lutris"
+
+[[app]]
+id = "mangohud-ui"
+name = "MangoHud + GOverlay"
+category = "gaming"
+summary = "FPS/frametime HUD and a GUI to configure it per game"
+tier = "verified"
+size_mib = 45
+pacman = ["mangohud", "goverlay", "lib32-mangohud"]
+gaming = true
+profiles = ["gamerte", "handheld", "studio"]
+post_install = ["hedron-overlay link --mangohud"]
+icon = "utilities-system-monitor"
+
+[[app]]
+id = "gamemode-ui"
+name = "GameMode controls"
+category = "gaming"
+summary = "Edit per-game tuning profiles and see what FlowState actually changed"
+tier = "verified"
+size_mib = 12
+hedron = "hedronos-gamemode"
+gaming = true
+profiles = ["gamerte", "handheld", "desktop", "studio"]
+icon = "preferences-system"
+
+[[app]]
+id = "protonplus"
+name = "ProtonPlus / GE downloader"
+category = "gaming"
+summary = "Grab Proton-GE, Wine-GE and DXVK builds with one click"
+tier = "community"
+size_mib = 30
+flatpak = "com.vysp3r.ProtonPlus"
+gaming = true
+profiles = ["gamerte", "handheld"]
+icon = "system-software-update"
+
+[[app]]
+id = "prism12"
+name = "Prism12 (Waydroid-free Android)"
+category = "gaming"
+summary = "Play mobile titles in a containerised Android runtime"
+tier = "community"
+size_mib = 1800
+aur = "prism12-bin"
+gaming = true
+icon = "smartphone"
+
+[[app]]
+id = "launchbox"
+name = "LaunchBox / Big Box"
+category = "gaming"
+summary = "A library front-end for everything that is not Steam"
+tier = "community"
+size_mib = 300
+aur = "launchbox-bin"
+gaming = true
+icon = "applications-games"
+
+# ---- emulation ---------------------------------------------------------
+[[app]]
+id = "retroarch"
+name = "RetroArch"
+category = "emulation"
+summary = "libretro cores for everything up to PS1/N64/Dreamcast, with run-ahead"
+tier = "verified"
+size_mib = 220
+pacman = ["retroarch", "retroarch-assets", "libretro-snes9x", "libretro-mupen64plus-next", "libretro-ppsspp"]
+gaming = true
+profiles = ["gamerte", "handheld"]
+icon = "input-gaming"
+
+[[app]]
+id = "dolphin-emu"
+name = "Dolphin"
+category = "emulation"
+summary = "GameCube and Wii, near-perfect on any modern GPU"
+tier = "verified"
+size_mib = 120
+flatpak = "org.DolphinEmu.dolphin-emu"
+gaming = true
+profiles = ["gamerte", "handheld"]
+icon = "dolphin-emu"
+
+[[app]]
+id = "pcsx2"
+name = "PCSX2"
+category = "emulation"
+summary = "PS2 emulator with hardware renderer and upscaling"
+tier = "verified"
+size_mib = 110
+flatpak = "net.pcsx2.PCSX2"
+gaming = true
+profiles = ["gamerte", "handheld"]
+icon = "pcsx2"
+
+[[app]]
+id = "rpcs3"
+name = "rpcs3"
+category = "emulation"
+summary = "PS3 emulator — PPU recompiler, per-game compatibility notes built in"
+tier = "community"
+size_mib = 150
+flatpak = "net.rpcs3.RPCS3"
+gaming = true
+icon = "rpcs3"
+
+[[app]]
+id = "shadps4"
+name = "shadPS4"
+category = "emulation"
+summary = "Early PS4 emulator; several titles are fully playable"
+tier = "unsupported"
+size_mib = 130
+aur = "shadps4-git"
+gaming = true
+notes = "Marked 'unsupported' in the store on purpose: it is pre-1.0 and we do not want you blaming us for a broken save."
+icon = "applications-games"
+
+[[app]]
+id = "yuzu-fork"
+name = "Sudachi / Citra fork (Switch & 3DS)"
+category = "emulation"
+summary = "Switch and 3DS emulation from the maintained forks"
+tier = "unsupported"
+size_mib = 260
+aur = "sudachi-appimage"
+gaming = true
+icon = "applications-games"
+
+# ---- streaming ---------------------------------------------------------
+[[app]]
+id = "obs"
+name = "OBS Studio"
+category = "streaming"
+summary = "Record and stream, with the NVENC/AMF/VAAPI plugins HedronOS preconfigures"
+tier = "verified"
+size_mib = 240
+pacman = ["obs-studio", "obs-vkcapture", "obs-plugin-source-record", "xfce4-notifyd"]
+profiles = ["gamerte", "studio", "desktop"]
+post_install = ["hedron-replay configure --obs"]
+icon = "obs"
+
+[[app]]
+id = "moonlight"
+name = "Moonlight Qt"
+category = "streaming"
+summary = "Stream from another PC with HDR and 120 Hz support"
+tier = "verified"
+size_mib = 80
+flatpak = "com.rtcrashgames.moonychannel"
+pacman = ["moonlight-qt"]
+gaming = true
+profiles = ["gamerte", "handheld"]
+icon = "video-display"
+
+[[app]]
+id = "sunshine"
+name = "Sunshine host"
+category = "streaming"
+summary = "Self-hosted game streaming server for the other machines in your house"
+tier = "verified"
+size_mib = 40
+pacman = ["sunshine"]
+profiles = ["gamerte"]
+post_install = ["systemctl enable --now sunshine.service"]
+icon = "network-server"
+
+[[app]]
+id = "keeper"
+name = "Keeper (Instant Replay GUI)"
+category = "streaming"
+summary = "Browse, cut and share the last 60 seconds without leaving the game"
+tier = "verified"
+size_mib = 22
+hedron = "hedronos-capture"
+gaming = true
+profiles = ["gamerte", "handheld", "studio"]
+icon = "media-record"
+
+[[app]]
+id = "voicenvidia"
+name = "NVIDIA Broadcast equivalents"
+category = "streaming"
+summary = "Noise removal + background blur via RNNoise and a small ONNX runtime"
+tier = "community"
+size_mib = 400
+aur = "noise-suppression-for-voice"
+pacman = ["rnnoise"]
+icon = "audio-volume-high"
+
+# ---- browsers ----------------------------------------------------------
+[[app]]
+id = "firefox"
+name = "Firefox"
+category = "browsers"
+summary = "Default browser, with hardware VA-API decode and Wayland enabled out of the box"
+tier = "verified"
+size_mib = 210
+pacman = ["firefox", "firefox-i18n-en-us"]
+profiles = ["gamerte", "desktop", "studio"]
+post_install = ["hedron-tune browser-optimize firefox"]
+icon = "firefox"
+
+[[app]]
+id = "chromium"
+name = "Chromium"
+category = "browsers"
+summary = "For when a site genuinely needs Blink; GPU compositing enabled"
+tier = "verified"
+size_mib = 260
+pacman = ["chromium"]
+icon = "chromium"
+
+[[app]]
+id = "brave"
+name = "Brave"
+category = "browsers"
+summary = "Chromium with the ad blocker built in"
+tier = "community"
+size_mib = 300
+flatpak = "com.brave.Browser"
+icon = "brave"
+
+[[app]]
+id = "librewolf"
+name = "LibreWolf"
+category = "browsers"
+summary = "Hardened Firefox: no telemetry, uBlock pre-installed"
+tier = "community"
+size_mib = 220
+flatpak = "io.gitlab.librewolf-community"
+icon = "librewolf"
+
+# ---- communication -----------------------------------------------------
+[[app]]
+id = "discord"
+name = "Discord"
+category = "communication"
+summary = "Voice chat with hardware encode and the overlay that actually works here"
+tier = "community"
+size_mib = 190
+pacman = ["discord", "lib32-libcurl-compat"]
+profiles = ["gamerte"]
+post_install = ["hedron-store hint discord-overlay"]
+icon = "discord"
+
+[[app]]
+id = "telegram"
+name = "Telegram Desktop"
+category = "communication"
+summary = "Fast chat, cloud history, video calls"
+tier = "verified"
+size_mib = 130
+pacman = ["telegram-desktop"]
+profiles = ["gamerte", "desktop"]
+icon = "telegram-desktop"
+
+[[app]]
+id = "thunderbird"
+name = "Thunderbird"
+category = "communication"
+summary = "Mail, calendar and feeds in one client"
+tier = "verified"
+size_mib = 170
+pacman = ["thunderbird", "thunderbird-i18n-en-us"]
+profiles = ["desktop", "studio"]
+icon = "thunderbird"
+
+[[app]]
+id = "element"
+name = "Element"
+category = "communication"
+summary = "Matrix client for the self-hosted-crowd group chats"
+tier = "community"
+size_mib = 140
+flatpak = "im.riot.Riot"
+icon = "element"
+
+[[app]]
+id = "vespa"
+name = "Vesktop (Spotify + Lavalier)"
+category = "communication"
+summary = "Spotify desktop with ListenBrainz scrobbling"
+tier = "community"
+size_mib = 110
+aur = "vesktop-bin"
+icon = "spotify"
+
+# ---- productivity ------------------------------------------------------
+[[app]]
+id = "libreoffice"
+name = "LibreOffice"
+category = "office"
+summary = "Writer, Calc, Impress with the GTK3 VCL plugin for crisp Wayland text"
+tier = "verified"
+size_mib = 700
+pacman = ["libreoffice-fresh", "libreoffice-fresh-sdk", "hunspell_en_us", "mythes-en"]
+profiles = ["desktop", "studio"]
+icon = "libreoffice"
+
+[[app]]
+id = "onlyoffice"
+name = "ONLYOFFICE Desktop"
+category = "office"
+summary = "When a document from work must look identical"
+tier = "community"
+size_mib = 420
+flatpak = "org.onlyoffice.desktopeditors"
+icon = "office-calendar"
+
+[[app]]
+id = "org-manager"
+name = "Organize & notes"
+category = "office"
+summary = "Obsidian, Zettlr and a todo app — pick your religion later"
+tier = "community"
+size_mib = 260
+flatpak = "md.obsidian.Obsidian"
+pacman = ["zettlr"]
+icon = "accessories-text-editor"
+
+[[app]]
+id = "password-store"
+name = "Pass + OTP"
+category = "security"
+summary = "GPG-backed password store with a TOTP browser bridge"
+tier = "verified"
+size_mib = 25
+pacman = ["pass", "oath-toolkit", "yubico-yubioath-desktop"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+icon = "security-high"
+
+# ---- creative ----------------------------------------------------------
+[[app]]
+id = "blender"
+name = "Blender"
+category = "creative"
+summary = "3D with Cycles on CUDA/OptiX/HIP — HedronOS installs the right device backend for your GPU"
+tier = "verified"
+size_mib = 900
+pacman = ["blender", "opencl-mesa"]
+profiles = ["studio"]
+post_install = ["hedron-drivers configure --cycles"]
+icon = "blender"
+
+[[app]]
+id = "krita"
+name = "Krita"
+category = "creative"
+summary = "Painting with GPU-accelerated brush engines and HDR"
+tier = "verified"
+size_mib = 300
+pacman = ["krita"]
+profiles = ["studio"]
+icon = "krita"
+
+[[app]]
+id = "gimp"
+name = "GIMP"
+category = "creative"
+summary = "The photo workhorse, single-window mode by default"
+tier = "verified"
+size_mib = 280
+pacman = ["gimp"]
+profiles = ["desktop", "studio"]
+icon = "gimp"
+
+[[app]]
+id = "darktable"
+name = "darktable"
+category = "creative"
+summary = "RAW pipeline with OpenCL demosaicing on your dGPU"
+tier = "verified"
+size_mib = 260
+pacman = ["darktable", "libgphoto2"]
+profiles = ["studio"]
+icon = "darktable"
+
+[[app]]
+id = "kdenlive"
+name = "Kdenlive"
+category = "creative"
+summary = "Multitrack video editor with hardware encode/decode presets"
+tier = "verified"
+size_mib = 340
+pacman = ["kdenlive", "qmmp"]
+profiles = ["studio", "desktop"]
+icon = "kdenlive"
+
+[[app]]
+id = "inkscape"
+name = "Inkscape"
+category = "creative"
+summary = "Vector drawing"
+tier = "verified"
+size_mib = 180
+pacman = ["inkscape"]
+profiles = ["studio"]
+icon = "inkscape"
+
+[[app]]
+id = "audacity"
+name = "Audacity"
+category = "creative"
+summary = "Quick multitrack audio edits with the pipewire-jack backend"
+tier = "verified"
+size_mib = 90
+pacman = ["audacity"]
+profiles = ["studio", "desktop"]
+icon = "audacity"
+
+[[app]]
+id = "ardour"
+name = "Ardour"
+category = "creative"
+summary = "Pro DAW; pair with the studio profile's low-latency kernel"
+tier = "community"
+size_mib = 220
+pacman = ["ardour", "lilv", "meterbridge"]
+profiles = ["studio"]
+post_install = ["hedron-tune profile set studio"]
+icon = "ardour"
+
+# ---- media -------------------------------------------------------------
+[[app]]
+id = "vlc"
+name = "VLC"
+category = "media"
+summary = "Plays everything, with hardware decode turned on and the codecs pre-linked"
+tier = "verified"
+size_mib = 130
+pacman = ["vlc", "ffmpeg", "gstreamer", "gst-plugins-good", "gst-plugins-bad", "gst-libav"]
+profiles = ["gamerte", "desktop", "studio"]
+icon = "vlc"
+
+[[app]]
+id = "spotify"
+name = "Spotify"
+category = "media"
+summary = "Music client with gapless + MPRIS so the OSD shows it"
+tier = "community"
+size_mib = 140
+aur = "spotify"
+flatpak = "com.spotify.Client"
+profiles = ["gamerte", "desktop"]
+icon = "spotify"
+
+[[app]]
+id = "mpv"
+name = "mpv"
+category = "media"
+summary = "The player for people with opinions; vo=gpu-next + hwdec=auto-safe preset"
+tier = "verified"
+size_mib = 40
+pacman = ["mpv", "mpv-mpris", "shaderc"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+post_install = ["hedron-mpv-profile install"]
+icon = "mpv"
+
+[[app]]
+id = "stremio"
+name = "Stremio"
+category = "media"
+summary = "Addon-based media centre for the TV box"
+tier = "community"
+size_mib = 200
+flatpak = "com.stremio.Stremio"
+icon = "video-x-generic"
+
+# ---- development -------------------------------------------------------
+[[app]]
+id = "vscode"
+name = "Visual Studio Code"
+category = "development"
+summary = "Or VSCodium if you would rather not send telemetry"
+tier = "community"
+size_mib = 420
+pacman = ["code"]
+aur = "visual-studio-code-bin"
+profiles = ["desktop", "studio", "gamerte"]
+icon = "visual-studio-code"
+
+[[app]]
+id = "podman"
+name = "Podman + Docker"
+category = "development"
+summary = "Rootless containers, compose plugin, and the docker socket toggle"
+tier = "verified"
+size_mib = 340
+pacman = ["podman", "docker-compose", "slirp4netns", "fuse-overlayfs"]
+profiles = ["desktop", "studio", "core"]
+post_install = ["hedron-containers enable"]
+icon = "container-podman"
+
+[[app]]
+id = "gitui"
+name = "gitui + lazygit + git-lfs"
+category = "development"
+summary = "Terminal Git that is fast enough to keep up with you"
+tier = "verified"
+size_mib = 60
+pacman = ["gitui", "lazygit", "git-lfs", "delta"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+icon = "git"
+
+[[app]]
+id = "toolchains"
+name = "Compiler & language toolchains"
+category = "development"
+summary = "gcc, clang, rust, go, python, node — the base-devel superset"
+tier = "verified"
+size_mib = 2400
+pacman = ["gcc", "clang", "rust", "go", "python", "nodejs", "pnpm", "cmake", "meson", "ninja"]
+profiles = ["studio", "core"]
+icon = "application-x-development-file"
+
+[[app]]
+id = "direnv"
+name = "dotenv tooling"
+category = "development"
+summary = "direnv, asdf/rtx and a sane shell starter"
+tier = "community"
+size_mib = 60
+pacman = ["direnv", "rtx"]
+icon = "utilities-terminal"
+
+[[app]]
+id = "unity-ue"
+name = "Game engines"
+category = "development"
+summary = "Godot (all builds) and Unity via the official hub"
+tier = "community"
+size_mib = 1800
+pacman = ["godot", "godot-mono"]
+aur = "unityhub"
+gaming = true
+profiles = ["studio"]
+icon = "applications-engineering"
+
+# ---- utilities / system -------------------------------------------------
+[[app]]
+id = "term-fancy"
+name = "Kitty + foot terminals"
+category = "utilities"
+summary = "GPU-accelerated terminals, both configured with the Hedron theme"
+tier = "verified"
+size_mib = 45
+pacman = ["kitty", "foot"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+icon = "utilities-terminal"
+
+[[app]]
+id = "htop"
+name = "Process & system monitors"
+category = "utilities"
+summary = "htop, btop and glances with GPU panels pre-wired"
+tier = "verified"
+size_mib = 25
+pacman = ["htop", "btop", "glances", "nvtop"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+icon = "utilities-system-monitor"
+
+[[app]]
+id = "filetools"
+name = "Archive & file tools"
+category = "utilities"
+summary = "7-zip, rar, unrar, zstd, rclone, doublecmd"
+tier = "verified"
+size_mib = 90
+pacman = ["p7zip", "unarj2", "zip", "unzip", "zstd", "rclone", "doublecmd"]
+profiles = ["desktop", "gamerte"]
+icon = "archive-manager"
+
+[[app]]
+id = "syncthing"
+name = "Syncthing"
+category = "network"
+summary = "P2P file sync for the save-game folder across your machines"
+tier = "verified"
+size_mib = 40
+pacman = ["syncthing", "syncthing-gtk"]
+profiles = ["gamerte", "desktop", "studio"]
+post_install = ["systemctl --user enable --now syncthing.service"]
+icon = "network-workgroup"
+
+[[app]]
+id = "transmission"
+name = "Transmission"
+category = "network"
+summary = "Torrent client with the queue limits a gaming connection can survive"
+tier = "verified"
+size_mib = 30
+pacman = ["transmission-gtk"]
+icon = "network-workgroup"
+
+[[app]]
+id = "localsend"
+name = "LocalSend"
+category = "network"
+summary = "AirDrop for everything else"
+tier = "community"
+size_mib = 60
+flatpak = "org.localsend.localsend_app"
+icon = "network-wireless"
+
+[[app]]
+id = "hardinfo"
+name = "Hardware reporters"
+category = "hardware"
+summary = "lshw, hardinfo2, inxi and a `hedron-doctor --paste` bundle"
+tier = "verified"
+size_mib = 40
+pacman = ["inxi", "hardinfo2", "lshw", "dmidecode"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+icon = "computer"
+
+[[app]]
+id = "corectrl"
+name = "CoreCtrl / fan & power curves"
+category = "hardware"
+summary = "Undervolt and fan control for AMD/NVIDIA without touching a terminal"
+tier = "verified"
+size_mib = 30
+pacman = ["corectrl"]
+profiles = ["gamerte", "desktop"]
+requires = ["steam"]
+post_install = ["hedron-tune gpu-clocks restore-on-boot"]
+icon = "cpu"
+
+[[app]]
+id = "openrgb"
+name = "OpenRGB"
+category = "hardware"
+summary = "Keyboard/mouse/fan lighting, no vendor bloat, works with 400+ devices"
+tier = "community"
+size_mib = 60
+pacman = ["openrgb"]
+profiles = ["gamerte"]
+post_install = ["hedron-rgb autodetect"]
+icon = "applications-graphics"
+
+[[app]]
+id = "firmware-updater"
+name = "Firmware updates (LVFS)"
+category = "system"
+summary = "fwupd so your GPU VBIOS, SSD and docks stay current"
+tier = "verified"
+size_mib = 25
+pacman = ["fwupd"]
+profiles = ["gamerte", "desktop", "studio", "core"]
+post_install = ["fwupdmgr refresh --force || true"]
+icon = "system-software-update"
+
+[[app]]
+id = "backup"
+name = "Backup & snapshots"
+category = "system"
+summary = "btrfs-assistant and a guided restic profile for your game saves"
+tier = "verified"
+size_mib = 60
+pacman = ["btrfs-assistant", "restic", "borgbackup"]
+profiles = ["desktop", "studio", "gamerte"]
+post_install = ["hedron-rollback enable"]
+icon = "drive-harddisk"
+
+[[app]]
+id = "vault"
+name = "Bitwarden & KeePassXC"
+category = "security"
+summary = "Password managers, one cloud one local"
+tier = "verified"
+size_mib = 120
+pacman = ["keepassxc"]
+flatpak = "com.bitwarden.desktop"
+profiles = ["desktop", "studio"]
+icon = "preferences-desktop-password"
+
+[[app]]
+id = "firejail"
+name = "Firejail + AppArmor profiles"
+category = "security"
+summary = "Sandbox the sketchy launcher; the store offers per-app toggles"
+tier = "community"
+size_mib = 30
+pacman = ["firejail", "apparmor"]
+icon = "security-high"
+
+[[app]]
+id = "vpn-tools"
+name = "VPN clients"
+category = "network"
+summary = "WireGuard, Tailscale and Mullvad-ready tooling"
+tier = "verified"
+size_mib = 45
+pacman = ["wireguard-tools", "tailscale", "networkmanager-strongswan"]
+profiles = ["gamerte", "desktop", "studio"]
+icon = "network-vpn"
+
+[[app]]
+id = "printing"
+name = "Printers & scanners"
+category = "utilities"
+summary = "CUPS + sane so the office printer is not a project"
+tier = "verified"
+size_mib = 240
+pacman = ["cups", "system-config-printer", "sane", "hplip"]
+profiles = ["desktop", "studio"]
+icon = "printer"
+
+[[app]]
+id = "wine-tools"
+name = "Wine + DXVK + VKD3D (full set)"
+category = "gaming"
+summary = "The Windows-compatibility layer, both arches, with the DXVK async build"
+tier = "verified"
+size_mib = 900
+pacman = ["wine", "wine-mono", "wine-gecko", "dxvk-mingw", "vkd3d", "lib32-vkd3d", "winetricks"]
+gaming = true
+profiles = ["gamerte", "desktop"]
+icon = "wine"

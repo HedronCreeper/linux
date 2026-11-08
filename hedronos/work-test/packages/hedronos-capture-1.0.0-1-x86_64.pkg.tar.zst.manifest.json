@@ -1,0 +1,66 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/replay.conf"
+ ],
+ "conflicts": [],
+ "depends": [
+  "ffmpeg",
+  "bash",
+  "coreutils",
+  "findutils"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/hedron",
+  "/etc/xdg",
+  "/etc/xdg/autostart",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/user"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-capture-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/hedron/",
+  "/etc/hedron/replay.conf",
+  "/etc/xdg/",
+  "/etc/xdg/autostart/",
+  "/etc/xdg/autostart/hedron-replay.desktop",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-replay",
+  "/usr/bin/hedron-share",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedron-replayd.py",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/user/",
+  "/usr/lib/systemd/user/hedron-replayd.service"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-capture",
+ "optional": [
+  "wf-recorder",
+  "gamescope",
+  "libpipewire",
+  "xdg-user-dir"
+ ],
+ "provides": [
+  "hedronos-replay"
+ ],
+ "release": "1",
+ "services_enable": [],
+ "size": 0,
+ "summary": "Rolling NVENC/AMF/VAAPI replay buffer, lossless clip saving and a share-ready export",
+ "units": [
+  "usr/lib/systemd/user/hedron-replayd.service"
+ ],
+ "version": "1.0.0"
+}

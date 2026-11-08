@@ -1,0 +1,38 @@
+# hedronos-vitals — one sampler, many HUDs.  SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-vitals"
+version = "1.0.0"
+release = "1"
+summary = "Single system-wide sampler for temps, clocks, frame times and pressure, with HUD and CLI"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["python", "bash"]
+check = ["python"]
+optional = ["nvidia-utils", "corectrl", "lm_sensors", "jq"]
+
+[install]
+tree = "src"
+# KWin needs the script inside its own data dir; the real file lives in a path that
+# gamescope's compositor-side loader and the tests can also reach. One source, two names.
+links = [{target = "/usr/lib/hedron/overlay/hedron-vitals.qml", link = "usr/share/kwin/scripts/hedron-vitals/contents/code/main.qml"}]
+
+[install.modes]
+"usr/bin/hedron-vitals" = "0755"
+"usr/lib/hedron/hedron-vitalsd.py" = "0755"
+"usr/lib/hedron/overlay/hedron-vitals.qml" = "0644"
+"usr/share/kwin/scripts/hedron-vitals/metadata.json" = "0644"
+"usr/share/kwin/scripts/hedron-vitals/main.js" = "0644"
+"usr/share/plasma/applets/hedronos.vitals/metadata.json" = "0644"
+"usr/share/plasma/applets/hedronos.vitals/contents/ui/main.qml" = "0644"
+"usr/lib/systemd/user/hedron-vitalsd.service" = "0644"
+"usr/lib/tmpfiles.d/hedron-vitals.conf" = "0644"
+
+[services]
+units = ["usr/lib/systemd/user/hedron-vitalsd.service"]
+
+[tests]
+modules = ["tests/test_vitals_sampler.py"]

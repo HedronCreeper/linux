@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Weekly HedronOS rollback snapshot
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+
+[Timer]
+# Randomised within the hour so a fleet of HedronOS machines does not all wake the disk at
+# once, and only when the machine happens to be on (no Persistent: a snapshot of a state
+# from three weeks ago is not a safety net, it is a trap).
+OnCalendar=Sun *-*-* 03:00:00
+RandomizedDelaySec=3600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

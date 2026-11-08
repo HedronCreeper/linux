@@ -1,0 +1,67 @@
+# Handheld power modes.  SPDX-License-Identifier: MIT
+#
+# `hedron-handheld mode <name>` applies one of these. Every knob here is written only if the
+# kernel actually exposes it on this machine — sysfs_write below lists the paths that are tried
+# in order, and a missing path is reported, never faked. That is what makes the same file useful
+# on a Steam Deck, an AYANEO and a laptop with a touchscreen.
+[meta]
+format = "hedronos-handheld-modes-1"
+
+[modes.performance]
+title = "Plugged in, maximum frames"
+summary = "TDP unlocked, boost on, fan target raised, no sleep"
+cpu_governor = "performance"
+amd_pstate = "active"
+tdp_w = 28
+turbo = 1
+brightness = 100
+screen_blank_min = 0
+sched_profile = "performance"
+replay = "off"
+gamemode_extra = "nosync"
+sysfs_write = ["/sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw"]
+
+[modes.balanced]
+title = "The mode you should leave it in"
+summary = "~15 W, frames stay above the refresh floor, fans barely audible"
+cpu_governor = "schedutil"
+tdp_w = 15
+turbo = 1
+brightness = 70
+screen_blank_min = 10
+sched_profile = "gaming"
+replay = "on"
+
+[modes.battery]
+title = "Last 20 % and no charger in sight"
+summary = "10 W, GPU clock floor lowered, browser tab hibernation"
+cpu_governor = "powersave"
+tdp_w = 10
+turbo = 0
+brightness = 40
+screen_blank_min = 3
+sched_profile = "battery"
+replay = "off"
+extra_cmd = "hedron-tune sysctl apply battery"
+
+[modes.silent]
+title = "Someone is asleep next to you"
+summary = "9 W + AMD PMF silent mode; frames capped at 30"
+cpu_governor = "powersave"
+tdp_w = 9
+turbo = 0
+brightness = 25
+fps_cap = 30
+sched_profile = "battery"
+cnqf_enable = 1
+replay = "off"
+
+[modes.tablet]
+title = "Keyboard detached"
+summary = "On-screen input, touch-friendly scaling, accelerometer on"
+cpu_governor = "ondemand"
+tdp_w = 12
+brightness = 60
+touch_scale = 1.35
+sched_profile = "desktop"
+haptic_keyboard = true

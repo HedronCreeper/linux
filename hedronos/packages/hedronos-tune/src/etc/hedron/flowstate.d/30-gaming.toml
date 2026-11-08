@@ -1,0 +1,77 @@
+# FlowState: GAMING — what the distro engages when a game owns the screen.
+# SPDX-License-Identifier: MIT
+#
+# This file is the entire "Linux gaming tuning" story in one readable place, and unlike
+# the forum copy-paste lists it is: (a) applied as one transaction, (b) reverted as one
+# transaction, (c) explained by `hedron-tune show gaming --diff`.
+[profile]
+name = "gaming"
+inherits = "balanced"
+note = "Latency-first: shallow idle states off, GPU in 'high' power state, scx_hedron engaged."
+
+[cpu]
+governor = "performance"
+energy_performance_preference = "performance"
+boost = true
+# C1/C1E are the ones that cost 40-120 µs to wake from, which is a visible stutter at
+# 120-165 Hz. Deeper states (C6) stay enabled — that is the difference between "smooth"
+# and "hot and loud".
+disable_idle_states = [1, 2]
+
+[sysctl]
+# Aggressive reclaim off: a page fault storm during level load must not compete with the
+# render thread.
+"vm.watermark_scale_factor" = 300
+"vm.dirty_expire_centisecs" = 3000
+"vm.dirty_writeback_centisecs" = 1500
+"vm.stat_interval" = 30
+# Busy-poll only matters for 120 Hz+ netcode; keep it modest so idle power does not explode.
+"net.core.busy_poll" = 20
+"net.core.busy_read" = 20
+"kernel.sched_migration_cost_ns" = 800000
+"kernel.sched_min_granularity_ns" = 6000000
+"vm.compact_unevictable_allowed" = 0
+
+[sysfs]
+"sys/kernel/mm/transparent_hugepage/defrag" = "defer"
+"sys/devices/system/cpu/cpu*/cpuidle/state1/disable" = "1"
+"sys/devices/system/cpu/intel_pstate/min_perf_pct" = 60
+
+[gpu]
+# amdgpu: keep the clocks up so the first frame after an alt-tab is not a 40 ms outlier.
+# nvidia: the vendor overlay drives this instead.
+power_profile = "high"
+gpu_clock_lock = "auto"
+
+[sched]
+scheduler = "hedron"
+[sched.cgroup]
+"hedron-game.slice/cpu.weight" = 280
+"user.slice/memory.high" = ""
+
+[irq]
+isolate_irq_pattern = "nvme* amdgpu* nvidia* en*"
+cpus = "performance"
+
+[limits]
+"@" = { rtprio = 99, memlock = 1048576, nofile = "2097152" }
+
+[env]
+# Present immediately (mailbox) instead of queuing: it is the single biggest "Linux feels
+# laggy in menus" fix, and it costs nothing on VRR panels.
+MESA_VK_WSI_PRESENT_MODE = "mailbox"
+DXVK_ASYNC = "1"
+WINEESYNC = "1"
+WINEFSYNC = "1"
+ENABLE_HDR_WSI = "1"
+__GL_THREADED_OPTIMIZATIONS = "0"
+MANGOHUD = "1"
+
+[services]
+enable = ["hedron-flowstate.service", "hedron-gamemoded.service", "hedron-replayd.service"]
+restart = ["sddm.service"]
+
+[extra]
+# Documented no-ops: things people expect a "gaming distro" to do that we deliberately skip.
+no-hugepages = { mode = "skip", command = "we do NOT preallocate hugepages: it hurts the rest of the system and helps only two games" }
+no-disable-rcu-normal = { mode = "skip", command = "rcu_normal is left alone: RCU callbacks are a stability trade we refuse to make" }

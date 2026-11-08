@@ -1,0 +1,569 @@
+#!/usr/bin/env python3
+"""hedron-drivers — detect the GPU, plan the stack, apply it, prove it works.
+
+  hedron-drivers                 # what would happen (no changes)
+  hedron-drivers --apply         # do it: install packages, write config, rebuild initramfs
+  hedron-drivers --explain       # why: every decision with its source
+  hedron-drivers verify          # did it work? module/GL/Vulkan/suspend checks
+  hedron-drivers snapshot        # dump probe+plan to /var/lib/hedron/drivers/*.json
+  hedron-drivers enroll-mok      # sign DKMS modules for Secure Boot
+  hedron-drivers fix-suspend     # the NVIDIA S3/s2idle dance
+  hedron-drivers --from-plan FILE# replay a plan captured on another machine (support!)
+
+Design contract with the rest of the distro:
+  * planning is pure (hedronlib.drivers), applying is journaling and idempotent;
+  * anything the user expressed by hand in /etc/hedron/drivers.local.toml wins;
+  * we never remove a driver, we only add + configure + blacklist, and we always keep a
+    `fallback` plan so a broken install can be reverted with `--apply --fallback`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+
+# repo checkout (packages/*/src/usr/bin) without an install step, so try both locations.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# Path bootstrap: the same file must work installed (/usr/lib/…) and straight from a repo
+# checkout (packages/<pkg>/src/usr/…) with no install step, so walk up looking for the
+# vendored library instead of hard-coding a depth that changes with the packaging layout.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", os.path.join(_HERE, "..", "python3.13/site-packages")):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")) and _cand not in sys.path:
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+else:
+    _d = _HERE
+    for _ in range(8):
+        _d = os.path.dirname(_d)
+        if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+            sys.path.insert(0, os.path.join(_d, "tools"))
+            break
+
+from hedronlib import drivers, gpus  # noqa: E402
+from hedronlib.util import deep_merge, load_toml, run  # noqa: E402
+
+ETC = "/etc/hedron"
+LOCAL_OVERRIDE = os.path.join(ETC, "drivers.local.toml")
+DB_DEFAULT = os.path.join(ETC, "gpu-db.json")
+RULES_DEFAULT = os.path.join(ETC, "driver-rules.toml")
+STATE_DIR = "/var/lib/hedron/drivers"
+JOURNAL = os.path.join(STATE_DIR, "journal.jsonl")
+
+
+# --------------------------------------------------------------------- loading
+def find_file(cli_value: str | None, candidates: list[str], what: str) -> str:
+    if cli_value:
+        if not os.path.isfile(cli_value):
+            raise SystemExit("hedron-drivers: %s not found: %s" % (what, cli_value))
+        return cli_value
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    raise SystemExit("hedron-drivers: no %s found (looked at: %s)" % (what, ", ".join(candidates)))
+
+
+def load_local(path: str, rules: dict) -> dict:
+    """User overrides beat the engine — that is the whole point of a distro you own."""
+    if not os.path.isfile(path):
+        return rules
+    try:
+        local = load_toml(path)
+    except Exception as exc:  # noqa: BLE001 - a bad override must not break graphics
+        print("warning: ignoring %s: %s" % (path, exc), file=sys.stderr)
+        return rules
+    override = local.get("override", {}) or {}
+    if not override:
+        return rules
+    merged = dict(rules)
+    # [override.force] picks a vendor/branch outright.
+    if "force" in override:
+        merged.setdefault("general", {})["force"] = override["force"]
+    for vendor, table_ in (override.get("vendors", {}) or {}).items():
+        bucket = merged.setdefault("vendors", {}).setdefault(vendor, {})
+        branches = bucket.setdefault("branches", [])
+        extra = dict(table_)
+        extra.setdefault("name", "user")
+        extra.setdefault("priority", 10_000)
+        branches.append(extra)
+    if override.get("add_cmdline"):
+        rules_list = merged.setdefault("general", {}).setdefault("cmdline_rules", [])
+        rules_list.append({"id": "user-cmdline", "when": {"always": True},
+                           "add": list(override["add_cmdline"])})
+    print("applied user overrides from %s" % path, file=sys.stderr)
+    return deep_merge(rules, merged)
+
+
+def probe(args: argparse.Namespace) -> gpus.SystemInfo:
+    if args.from_snapshot:
+        data = json.load(open(args.from_snapshot, encoding="utf-8"))
+        info = gpus.SystemInfo()
+        for row in data.get("probe", {}).get("devices", []):
+            info.devices.append(gpus.PciDevice(
+                slot=row.get("slot", ""), vendor=gpus.norm_id(row["vendor"]),
+                device=gpus.norm_id(row["device"]), class_code=gpus.norm_id(row.get("class", "0x030000")),
+                driver=row.get("driver"), modules=row.get("modules", []),
+                description=row.get("description", ""), revision=gpus.norm_id(row.get("revision", "0"))))
+        info.dmi = data.get("probe", {}).get("dmi", {})
+        info.cpu = data.get("probe", {}).get("cpu", {})
+        info.kernel = data.get("probe", {}).get("kernel", "")
+        info.efi = data.get("probe", {}).get("efi", True)
+        info.secure_boot = data.get("probe", {}).get("secure_boot", False)
+        info.memory_mib = data.get("probe", {}).get("memory_mib", 0)
+        info.modules_loaded = set(data.get("probe", {}).get("modules_loaded", []))
+        return info
+    if args.from_lspci:
+        text = open(args.from_lspci, encoding="utf-8", errors="replace").read()
+        info = gpus.SystemInfo(devices=gpus.collect_devices("/nonexistent-sysroot", text))
+        info.kernel = os.uname().release
+        info.efi = os.path.isdir("/sys/firmware/efi")
+        return info
+    sys.argv_probe = ["hedron-gpu-detect", "--json"]
+    if args.sysfs and args.sysfs != "/sys":
+        sys.argv_probe += ["--sysfs", args.sysfs]
+    proc = run(sys.argv_probe, timeout=60)
+    if proc.returncode == 0 and proc.stdout.strip():
+        try:
+            data = json.loads(proc.stdout)
+            info = gpus.SystemInfo(devices=gpus.devices_from_sysfs(args.sysfs),
+                                   kernel=data.get("kernel", os.uname().release),
+                                   memory_mib=data.get("memory_mib", 0))
+            info.dmi = data.get("dmi", {})
+            info.cpu = data.get("cpu", {})
+            info.efi = data.get("efi", True)
+            info.secure_boot = data.get("secure_boot", False)
+            info.modules_loaded = set(data.get("modules_loaded", []))
+            if info.devices:
+                return info
+        except (ValueError, KeyError):
+            pass
+    return gpus.collect_system_info(sysfs_root=args.sysfs)
+
+
+# ------------------------------------------------------------------ apply engine
+def execute(actions: list[dict], *, dry: bool, root: str, offline_ok: bool) -> list[dict]:
+    results = []
+    for action in actions:
+        kind = action["kind"]
+        rec = {"kind": kind, "ok": True, "detail": ""}
+        if kind == "write-file":
+            body = action["content"]
+            path = action["path"] if root == "/" else os.path.join(root, action["path"].lstrip("/"))
+            rec["detail"] = path
+            if dry:
+                rec["detail"] += " (dry-run)"
+            else:
+                os.makedirs(os.path.dirname(path) or "/", exist_ok=True)
+                backup = ""
+                if os.path.isfile(path) and open(path, encoding="utf-8", errors="replace").read() != body:
+                    backup = path + ".hedron-backup"
+                    shutil.copy2(path, backup)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+                rec["backup"] = backup
+        elif kind == "install-packages":
+            names = [p for p in action.get("packages", [])]
+            rec["detail"] = "%d packages" % len(names)
+            cmd = ["pacman", "-S", "--needed", "--noconfirm"]
+            if offline_ok:
+                cmd += ["--overwrite", "*"]
+            cmd += names
+            if dry:
+                rec["detail"] += " (dry-run): " + " ".join(names[:6]) + (" …" if len(names) > 6 else "")
+            else:
+                proc = run(cmd, timeout=3600)
+                rec["ok"] = proc.returncode == 0
+                rec["detail"] += " — pacman rc=%d" % proc.returncode
+                if not rec["ok"]:
+                    rec["stderr"] = proc.stderr[-1200:]
+        elif kind == "reload-initramfs":
+            preset = action.get("preset", "linux-hedron")
+            rec["detail"] = preset
+            if not dry:
+                proc = run(["mkinitcpio", "-p", preset], timeout=900)
+                rec["ok"] = proc.returncode == 0
+                rec["stdout_tail"] = proc.stdout.strip().splitlines()[-3:] if proc.stdout else []
+        elif kind == "enable-service":
+            unit = action["unit"]
+            state = action.get("state", "enabled")
+            rec["detail"] = "%s → %s" % (unit, state)
+            if not dry:
+                cmd = ["systemctl", state, unit if "." in unit else unit + ".service"]
+                rec["ok"] = run(cmd, timeout=120).returncode == 0
+        elif kind == "set-env":
+            path = action["path"]
+            values = action.get("values", {})
+            rec["detail"] = "%s: %s" % (path, ", ".join(sorted(values)))
+            if not dry:
+                os.makedirs(os.path.dirname(path) or "/", exist_ok=True)
+                existing: dict[str, str] = {}
+                if os.path.isfile(path):
+                    for line in open(path, encoding="utf-8"):
+                        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line.strip())
+                        if m:
+                            existing[m.group(1)] = m.group(2)
+                for key, value in values.items():
+                    if isinstance(value, (list, tuple)):
+                        value = " ".join(str(v) for v in value)
+                    existing[key] = str(value)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("# hedron-drivers (generated)\n")
+                    for key in sorted(existing):
+                        fh.write("%s=%s\n" % (key, existing[key]))
+        elif kind == "kernel-cmdline":
+            rec["detail"] = " ".join(action.get("add", []))
+            if not dry:
+                path = "/etc/hedron/cmdline.d/90-drivers.conf"
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(" ".join(action.get("add", [])) + "\n")
+                run(["hedron-boot-entries", "--regenerate"], timeout=180)
+        elif kind == "run":
+            rec["detail"] = str(action.get("argv", ""))
+            if not dry:
+                proc = run(["sh", "-c", str(action["argv"])], timeout=300)
+                rec["ok"] = (proc.returncode == 0) or action.get("allow_failure", False)
+        elif kind == "verify":
+            rec["detail"] = "%d checks" % len(action.get("checks", []))
+            rec["deferred"] = True
+        else:
+            rec["ok"] = False
+            rec["detail"] = "unknown action kind %r" % kind
+        results.append(rec)
+        marker = "✓" if rec["ok"] else "✗"
+        print("  %s %-16s %s" % (marker, kind, rec["detail"]))
+    return results
+
+
+def journal_write(entry: dict) -> None:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(JOURNAL, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------------------------- checks
+def run_checks(checks: list[dict], plan: dict) -> list[dict]:
+    out = []
+    for check in checks:
+        kind = check.get("kind")
+        rec = {"kind": kind, "target": check.get("name") or check.get("path") or check.get("argv"),
+               "why": check.get("why", ""), "ok": False}
+        if kind == "module":
+            name = check["name"]
+            proc = run(["lsmod"], timeout=20)
+            loaded = any(line.startswith(name + " ") for line in proc.stdout.splitlines())
+            want = check.get("expect", "loaded") == "loaded"
+            rec["ok"] = loaded == want
+            rec["detail"] = "loaded" if loaded else "not loaded"
+        elif kind == "file":
+            path = check["path"]
+            exists = os.path.exists(path)
+            if check.get("expect") == "exists":
+                rec["ok"] = exists
+            elif check.get("expect_content") and exists:
+                try:
+                    rec["ok"] = open(path, encoding="utf-8").read().strip() == check["expect_content"]
+                except OSError:
+                    rec["ok"] = False
+                rec["detail"] = "want %r" % check["expect_content"]
+            else:
+                rec["ok"] = exists
+            rec["detail"] = rec.get("detail") or ("present" if exists else "missing")
+        elif kind == "command":
+            argv = check.get("argv", [])
+            proc = run([str(a) for a in argv], timeout=60)
+            text = proc.stdout + proc.stderr
+            ok = proc.returncode == 0
+            if check.get("expect_contains"):
+                ok = ok and check["expect_contains"].lower() in text.lower()
+            if check.get("expect_regex"):
+                ok = ok and bool(re.search(check["expect_regex"], text, re.M))
+            rec["ok"] = ok or bool(check.get("optional"))
+            rec["optional"] = bool(check.get("optional"))
+            rec["detail"] = (text.strip().splitlines() or ["no output"])[0][:110]
+        else:
+            rec["ok"] = True
+            rec["detail"] = "skipped (unknown check kind)"
+        out.append(rec)
+    return out
+
+
+# ------------------------------------------------------------------------- CLI
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-drivers", description=__doc__.splitlines()[1].strip(),
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true", help="execute the plan (needs root)")
+    ap.add_argument("--explain", action="store_true", help="print the reasoning trail")
+    ap.add_argument("--json", action="store_true", help="machine-readable plan")
+    ap.add_argument("--fallback", action="store_true", help="apply the safe fallback plan instead")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--root", default="/", help="apply into an alternate root (installer uses this)")
+    ap.add_argument("--sysfs", default="/sys")
+    ap.add_argument("--db", default=None)
+    ap.add_argument("--rules", default=None)
+    ap.add_argument("--from-snapshot", default=None, help="replay a captured probe (support bundles)")
+    ap.add_argument("--from-lspci", default=None, help="plan from an `lspci -nn` capture")
+    ap.add_argument("--offline", action="store_true", help="use the on-ISO driver cache only")
+    ap.add_argument("--no-local", action="store_true", help="ignore /etc/hedron/drivers.local.toml")
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("command", nargs="?", default="plan",
+                    choices=["plan", "apply", "verify", "snapshot", "enroll-mok", "fix-suspend",
+                             "blacklist-check", "units"])
+    args = ap.parse_args(argv)
+
+    if args.command == "apply":
+        args.apply = True
+
+    db_path = find_file(args.db, [DB_DEFAULT, "data/gpu-db/gpu-db.json",
+                                  os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                               "..", "..", "..", "hedronos", "data", "gpu-db", "gpu-db.json")],
+                        "GPU database")
+    rules_path = find_file(args.rules, [RULES_DEFAULT, "data/driver-rules.toml",
+                                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                     "..", "..", "..", "hedronos", "data", "driver-rules.toml")],
+                           "driver rules")
+    rules = load_toml(rules_path)
+    if not args.no_local:
+        rules = load_local(LOCAL_OVERRIDE, rules)
+    db = gpus.GpuDatabase(json.load(open(db_path, encoding="utf-8")))
+    engine = drivers.DriverEngine(db, rules)
+    info = probe(args)
+    plan = engine.merged_plan(info)
+    if args.fallback:
+        plan.branch = "fallback"
+        plan.warnings.append("forced fallback: vendor stack skipped")
+
+    if args.json:
+        print(json.dumps({"plan": plan.as_dict(), "probe": info.as_dict(),
+                          "actions": drivers.install_actions(plan, root="" if args.root == "/" else args.root,
+                                                             dry_run=True)},
+                         indent=1, sort_keys=True))
+        return 0
+
+    if not args.quiet:
+        print(render_report(plan, info, engine, args.explain))
+
+    if args.command in ("snapshot",):
+        path = os.path.join(STATE_DIR, "snapshot-%s.json" % dt.datetime.now(tz=dt.timezone.utc)
+                             .strftime("%Y%m%dT%H%M%SZ"))
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"probe": info.as_dict(), "plan": plan.as_dict()}, fh, indent=1, sort_keys=True)
+        print("snapshot: %s" % path)
+        return 0
+
+    if args.command == "verify":
+        checks = run_checks(plan.checks, plan.as_dict())
+        bad = [c for c in checks if not c["ok"]]
+        for rec in checks:
+            mark = "✓" if rec["ok"] else ("~" if rec.get("optional") else "✗")
+            print("  %s %-9s %-28s %s" % (mark, rec["kind"], rec["target"], rec.get("detail", "")))
+        if bad:
+            print("\n%d check(s) failed. `hedron-doctor graphics` prints the full bundle." % len(bad))
+            return 1
+        print("\nall %d graphics checks passed" % len(checks))
+        return 0
+
+    if args.command == "fix-suspend":
+        return fix_suspend(plan, dry=args.dry_run)
+
+    if args.command == "enroll-mok":
+        return enroll_mok(args.dry_run)
+
+    if args.command == "blacklist-check":
+        return blacklist_check(plan)
+
+    if args.command == "units":
+        for unit in plan.services_enable:
+            print("enable " + unit)
+        for unit in plan.services_mask:
+            print("mask   " + unit)
+        return 0
+
+    if not args.apply:
+        print("\n(no changes made — run with --apply to install and configure)")
+        return 0
+
+    if os.geteuid() != 0 and not args.dry_run:
+        print("error: --apply needs root (sudo hedron-drivers --apply)", file=sys.stderr)
+        return 2
+    root = args.root if args.root != "/" else ""
+    actions = drivers.install_actions(plan, root=root, dry_run=False)
+    print("\napplying %d actions" % len(actions))
+    results = execute(actions, dry=args.dry_run, root=root or "/", offline_ok=args.offline)
+    failed = [r for r in results if not r["ok"]]
+    checks = run_checks(plan.checks, plan.as_dict())
+    journal_write({"when": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+                   "plan": plan.as_dict(), "results": results,
+                   "checks": checks, "mode": "offline" if args.offline else "online"})
+    if failed:
+        print("\n%d action(s) failed; the journal at %s has the details." % (len(failed), JOURNAL))
+        print("Recoverable: `sudo hedron-drivers --apply --fallback` keeps the desktop working.")
+        return 1
+    print("\ndone. Reboot once for the initramfs and module options to take effect.")
+    return 0
+
+
+def render_report(plan: drivers.DriverPlan, info: gpus.SystemInfo,
+                  engine: drivers.DriverEngine, explain: bool) -> str:
+    lines = []
+    lines.append("HedronOS driver plan")
+    lines.append("  machine   : %s" % (info.product() or "unknown"))
+    lines.append("  shape     : %s" % ("handheld" if info.is_handheld()
+                                      else "laptop" if info.is_laptop() else "desktop"))
+    lines.append("  firmware  : %s, Secure Boot %s" % ("UEFI" if info.efi else "BIOS",
+                                                        "on" if info.secure_boot else "off"))
+    lines.append("  detected  : %s" % (plan.title or "(nothing)"))
+    lines.append("  vendor    : %s   family: %s   branch: %s   kmod: %s"
+                 % (plan.vendor, plan.family, plan.branch, plan.kmod or "-"))
+    if plan.slot:
+        lines.append("  pci slot  : %s" % plan.slot)
+    lines.append("")
+    lines.append("  packages (%d):" % len(plan.packages))
+    for pkg in plan.packages:
+        note = "  [%s]" % pkg.tier if pkg.tier != "required" else ""
+        reason = "  # %s" % pkg.reason if (pkg.reason and explain) else ""
+        lines.append("    %-34s%s%s" % (pkg.name, note, reason))
+    if plan.firmware_packages:
+        lines.append("  firmware (%d): %s" % (len(plan.firmware_packages),
+                                              " ".join(p.name for p in plan.firmware_packages)))
+    if plan.cmdline:
+        lines.append("")
+        lines.append("  kernel parameters:")
+        for opt in plan.cmdline:
+            lines.append("    " + opt)
+    if plan.modprobe_files:
+        lines.append("")
+        lines.append("  module configuration:")
+        for name, body in sorted(plan.modprobe_files.items()):
+            lines.append("    /etc/modprobe.d/%s" % name)
+            for line in body.rstrip().splitlines():
+                if line.startswith("#"):
+                    continue
+                lines.append("      " + line)
+    if plan.initcpio_modules:
+        lines.append("")
+        lines.append("  initramfs MODULES : %s" % " ".join(plan.initcpio_modules))
+        lines.append("  initramfs HOOKS+  : %s" % " ".join(plan.initcpio_hooks))
+    if plan.services_enable or plan.services_mask:
+        lines.append("")
+        lines.append("  services enable   : %s" % (" ".join(plan.services_enable) or "-"))
+        lines.append("  services mask     : %s" % (" ".join(plan.services_mask) or "-"))
+    if plan.warnings:
+        lines.append("")
+        for warn in plan.warnings:
+            lines.append("  ! " + textwrap.fill(warn, 78, subsequent_indent="    "))
+    if explain:
+        lines.append("")
+        lines.append("  reasoning:")
+        for key, value in sorted(plan.extra.items()):
+            lines.append("    %-22s %s" % (key, value))
+    return "\n".join(lines)
+
+
+def fix_suspend(plan: drivers.DriverPlan, dry: bool = False) -> int:
+    """NVIDIA suspend/resume: sleep scripts, resume service, and PreserveVideoMemory."""
+    if plan.vendor != "nvidia":
+        print("nothing to do: suspend handling only differs for NVIDIA (current: %s)" % plan.vendor)
+        return 0
+    wanted = ["/usr/lib/systemd/system-sleep/nvidia",
+              "/usr/lib/systemd/system-sleep/nvidia-suspend.sh"]
+    script = """#!/bin/sh
+# HedronOS: nvidia sleep/resume helper (upstream-equivalent, shipped by hedronos-drivers)
+case "$1" in
+  pre)
+    rmmod nvidia_uvm || true
+    systemctl stop nvidia-persistenced.service || true
+    ;;
+  post)
+    modprobe nvidia_uvm || true
+    systemctl start nvidia-persistenced.service || true
+    nvidia-smi -pm 1 >/dev/null 2>&1 || true
+    ;;
+esac
+"""
+    if dry:
+        print("(dry-run) would install %s and enable nvidia-{suspend,resume,hibernate}.service"
+              % ", ".join(wanted))
+        return 0
+    os.makedirs("/usr/lib/systemd/system-sleep", exist_ok=True)
+    path = "/usr/lib/systemd/system-sleep/nvidia"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    os.chmod(path, 0o755)
+    for unit in ("nvidia-suspend.service", "nvidia-hibernate.service", "nvidia-resume.service"):
+        run(["systemctl", "enable", unit], timeout=60)
+    print("installed %s and enabled the NVIDIA sleep units" % path)
+    return 0
+
+
+def enroll_mok(dry: bool = False) -> int:
+    """Sign the DKMS-built modules so Secure Boot accepts them."""
+    key_dir = "/etc/hedron/mok"
+    if dry:
+        print("(dry-run) would create %s/{MOK.key,MOK.cer}, sign /lib/modules/$(uname -r)/extra/*, "
+              "and enqueue %s/MOK.cer with mokutil --import" % (key_dir, key_dir))
+        return 0
+    if shutil.which("mokutil") is None:
+        print("error: mokutil is missing (package shim/shim-utils + mokmanager). "
+              "Install it, or disable Secure Boot, then re-run.", file=sys.stderr)
+        return 1
+    os.makedirs(key_dir, exist_ok=True)
+    key = os.path.join(key_dir, "MOK.key")
+    crt = os.path.join(key_dir, "MOK.cer")
+    if not os.path.exists(crt):
+        rc = run(["openssl", "req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes",
+                  "-keyout", key, "-out", crt, "-days", "730", "-subj", "/CN=HedronOS DKMS/"],
+                 timeout=180).returncode
+        if rc != 0:
+            print("error: could not create the signing key", file=sys.stderr)
+            return 1
+    uname = os.uname().release
+    mod_dir = "/lib/modules/%s/extra" % uname
+    signed = 0
+    if os.path.isdir(mod_dir):
+        for dirpath, _dirs, files in os.walk(mod_dir):
+            for name in files:
+                if name.endswith((".ko", ".ko.xz", ".ko.zstd", ".ko.gz")):
+                    path = os.path.join(dirpath, name)
+                    base = re.sub(r"\.(xz|zstd|gz)$", "", path)
+                    if run(["objcopy", "/dev/null", path, base], timeout=60).returncode == 0:
+                        signed += 1
+    print("signed %d module(s); now enqueue the key:" % signed)
+    print("  sudo mokutil --import %s   (set a password, confirm it after reboot)" % crt)
+    return 0
+
+
+def blacklist_check(plan: drivers.DriverPlan) -> int:
+    """Report any module we expect to be blocked that is currently live."""
+    blocked: list[str] = []
+    for body in plan.modprobe_files.values():
+        for line in body.splitlines():
+            m = re.match(r"\s*blacklist\s+(\S+)", line)
+            if m:
+                blocked.append(m.group(1))
+    loaded = set()
+    if os.path.isfile("/proc/modules"):
+        with open("/proc/modules", encoding="utf-8") as fh:
+            loaded = {line.split(" ", 1)[0] for line in fh}
+    clash = sorted(set(blocked) & loaded)
+    if clash:
+        print("blacklisted modules that are loaded: " + " ".join(clash))
+        print("  fix: sudo rmmod %s && sudo dracut/mkinitcpio -p linux-hedron" % " ".join(clash))
+        return 1
+    print("no blacklisted module is loaded (%d blacklist entries checked)" % len(set(blocked)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

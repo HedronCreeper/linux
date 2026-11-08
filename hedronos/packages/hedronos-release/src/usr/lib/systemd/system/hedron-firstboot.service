@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS first-boot configuration (drivers, profiles, chosen apps)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=network-online.target systemd-tmpfiles-setup.service systemd-modules-load.service
+Wants=network-online.target
+# We deliberately do NOT use ConditionFirstBoot= alone: an offline install already has a
+# machine-id, so the marker file is the primary gate and first-boot is only an extra hint.
+ConditionPathExists=!/var/lib/hedron/firstboot-done
+ConditionPathExists=/.hedron-installed
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedron-firstboot.py
+# The driver step installs packages, so this needs the network and the disks — but it is
+# still sandboxed: no /home, no execution of setuid binaries, read-only /usr.
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=no
+ReadWritePaths=/etc /var/lib/hedron /var/cache/hedron /boot
+
+[Install]
+WantedBy=multi-user.target
+Alias=hedron-firstboot.target

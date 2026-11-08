@@ -1,0 +1,56 @@
+# hedronos-release — the identity, first-boot and rollback layer. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-release"
+version = "1.0.0"
+release = "1"
+summary = "HedronOS release files, hedronctl, first-boot orchestration and rollback snapshots"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "base"]
+
+[depends]
+runtime = ["filesystem", "sed", "grep", "diffutils", "systemd-libs", "openssl"]
+check = ["python"]
+optional = ["btrfs-progs", "snapper"]
+
+[provides]
+packages = ["hedronos-base"]
+
+[install]
+tree = "src"
+vendored = [{ from = "hedronlib", to = "usr/lib/python3.13/site-packages/hedronlib" }]
+
+[install.modes]
+"usr/bin/hedron-notify" = "0755"
+"usr/bin/hedronctl" = "0755"
+"usr/lib/hedron/hedron-rollback.py" = "0755"
+"usr/lib/hedron/hedron-firstboot.py" = "0755"
+"usr/lib/hedron/hedron-release-json.py" = "0755"
+"usr/lib/tmpfiles.d/hedron-release.conf" = "0644"
+"usr/share/libalpm/hooks/hedron-rollback.hook" = "0644"
+"usr/lib/systemd/system/hedron-firstboot.service" = "0644"
+"usr/lib/systemd/system/hedron-firstapps.service" = "0644"
+"usr/lib/systemd/system/hedron-firstapps.timer" = "0644"
+"usr/lib/systemd/system/hedron-rollback-snap@.service" = "0644"
+"usr/lib/systemd/system/hedron-rollback-autosnap.service" = "0644"
+"usr/lib/systemd/system/hedron-rollback-autosnap.timer" = "0644"
+"etc/hedron/features.json" = "0644"
+"etc/os-release" = "0644"
+"etc/issue" = "0644"
+"usr/share/hedron/branding/issue" = "0644"
+
+[services]
+enable = ["hedron-firstboot.service", "hedron-firstapps.timer", "hedron-rollback-autosnap.timer"]
+units = ["usr/lib/systemd/system/hedron-firstboot.service",
+         "usr/lib/systemd/system/hedron-firstapps.service",
+         "usr/lib/systemd/system/hedron-firstapps.timer",
+         "usr/lib/systemd/system/hedron-rollback-snap@.service",
+         "usr/lib/systemd/system/hedron-rollback-autosnap.service",
+         "usr/lib/systemd/system/hedron-rollback-autosnap.timer"]
+
+[files]
+preserve = ["/etc/hedron/features.json", "/etc/os-release"]
+
+[tests]
+modules = ["tests/test_release_files.py", "tests/test_rollback.py"]

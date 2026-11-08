@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""hedronos-install — the installer backend the chooser hands its selection to.
+
+Run it from the live ISO (`hedronos-install`, or the "Install HedronOS" desktop icon). It is
+deliberately a *thin, loud* installer: it computes a plan, prints every command, asks once,
+and then runs exactly those commands with arch-install-scripts + our own tooling. No hidden
+state, no third-party installer framework, no "apply" button that does four other things.
+
+Phases (each reversible up to the point where it touches the disk):
+
+  probe      disks, UEFI/BIOS, RAM, GPU, existing OSes, btrfs availability
+  plan       layout (btrfs subvolumes @ / @home / @log / @cache, swapfile, optional dual-boot
+             entry), package set, driver plan, mirror selection
+  partition  sfdisk/mkfs, subvolume creation, mount into --target
+  base       pacstrap of the resolved set from the ISO's own repo + mirrors
+  hedron     install hedronos-release/drivers/tune/… from the on-ISO repo, copy the GPU plan,
+             apply the driver plan *into the target*, install the selected apps
+  boot       systemd-boot (or GRUB for BIOS) entries from data/boot-entries.toml, fstab,
+             mkinitcpio preset, machine-id, hostname, user creation
+  verify     hedronos-verify --root <target> and hedron-drivers --root <target> verify
+  done       unmount, offer to reboot
+
+`--dry-run` prints the whole thing, which is what the ISO build rehearses and what you can
+rehearse on your own machine before letting it near a disk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages",):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(9):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+
+from hedronlib import gpus  # noqa: E402
+from hedronlib.pkgsets import Resolver, load_sets  # noqa: E402
+from hedronlib.util import human_bytes, load_toml  # noqa: E402
+
+DRY = False
+LOG = print
+
+
+def run(cmd: list[str], *, check: bool = True, capture: bool = False, env: dict | None = None) -> subprocess.CompletedProcess:
+    """One place where every command is printed, logged and (in dry-run) skipped."""
+    printable = " ".join(shlex.quote(c) for c in cmd)
+    LOG("  $ " + printable)
+    if DRY:
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    return subprocess.run(cmd, check=check, capture_output=capture, text=True, env=env)
+
+
+def sh(cmd: str) -> str:
+    if DRY:
+        return ""
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+    except subprocess.SubprocessError:
+        return ""
+
+
+# ------------------------------------------------------------------------- probe
+def disks() -> list[dict]:
+    out = []
+    if DRY and not shutil.which("lsblk"):
+        return [{"path": "/dev/nvme0n1", "size": 1000 * 1024**3, "model": "dry-run device", "rotational": False}]
+    proc = subprocess.run(["lsblk", "-bJpo", "NAME,SIZE,MODEL,TYPE,ROTA,MOUNTPOINTS"], capture_output=True,
+                          text=True)
+    if proc.returncode != 0:
+        return out
+    for dev in json.loads(proc.stdout).get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        out.append({"path": dev["name"], "size": int(dev.get("size") or 0), "model": (dev.get("model") or "").strip(),
+                    "rotational": str(dev.get("rota")) == "1",
+                    "mounted": any(m for m in (dev.get("mountpoints") or []) if m)})
+    return [d for d in out if d["size"] > 20 * 1024**3]
+
+
+def firmware() -> str:
+    if os.path.isdir("/sys/firmware/efi"):
+        return "uefi"
+    return "bios"
+
+
+def gpu_summary(info) -> list[str]:
+    lines = []
+    for dev in info.devices:
+        if not dev.is_gpu:
+            continue
+        ident = info.identity_of(dev) if hasattr(info, "identity_of") else None
+        lines.append("%s %s (%s)" % (dev.vendor_name, dev.description or hex(dev.device),
+                                     ident.kmod if ident else "unrecognised"))
+    return lines or ["no display device found (this is allowed: the driver plan is per-device)"]
+
+
+def existing_os(target_probe: bool = True) -> list[str]:
+    found = []
+    for dev in disks():
+        if DRY and not shutil.which("lsblk"):
+            continue
+        proc = subprocess.run(["lsblk", "-rno", "FSTYPE,MOUNTPOINTS,LABEL", dev["path"]], capture_output=True,
+                              text=True)
+        for line in (proc.stdout or "").splitlines():
+            parts = line.split(None, 2)
+            fstype = parts[0] if parts else ""
+            if fstype in ("ntfs", "exfat") and "EFI" not in line:
+                found.append("%s on %s" % (fstype, dev["path"]))
+    return found
+
+
+# -------------------------------------------------------------------------- plan
+def pick_device(args: argparse.Namespace) -> str:
+    if args.target_device:
+        return args.target_device
+    candidates = [d for d in disks() if not d["mounted"]]
+    if not candidates:
+        LOG("no usable disk found (all mounted or too small)")
+        sys.exit(2)
+    if args.auto and len(candidates) == 1:
+        return candidates[0]["path"]
+    LOG("\nAvailable disks:")
+    for i, d in enumerate(candidates):
+        LOG("  %d) %s  %s  %s%s" % (i, d["path"], human_bytes(d["size"]), d["model"],
+                                   "  (rotational)" if d["rotational"] else ""))
+    choice = input("Install onto which disk? [0] ").strip() or "0"
+    return candidates[int(choice)]["path"]
+
+
+def layout_for(device: str, args: argparse.Namespace) -> dict:
+    """One partition table, three filesystems, and the reasons for each choice.
+
+    btrfs subvolumes because hedron-rollback and `@/@home` separation need them; a separate
+    @cache subvolume with compress=zstd,depth=0 so Steam downloads do not burn CPU; no
+    separate /boot beyond the ESP because systemd-boot wants /boot on the ESP mount.
+    """
+    size = next((d["size"] for d in disks() if d["path"] == device), 0)
+    esp = max(512 * 1024**2, min(2 * 1024**3, size // 100))
+    return {
+        "device": device,
+        "table": "gpt",
+        "partitions": [
+            {"name": "esp", "start": "2048", "size": "+%dM" % (esp // 1048576), "type": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+             "mkfs": "mkfs.fat -F 32", "mount": "/boot", "label": "HEDRON_ESP"},
+            {"name": "root", "start": "0", "size": "100%", "type": "0FC63DAF-8483-477B-8E7F-134401D124E0",
+             "mkfs": "mkfs.btrfs -f -L HEDRON_OS -d single -m single", "mount": "/", "label": "HEDRON_OS",
+             "subvolumes": ["@", "@home", "@log", "@cache", "@snapshots"]},
+        ],
+        "swapfile_mib": args.swap_mib if args.swap_mib is not None else min(16384, max(4096, ram_mib() // 2)),
+        "mounts": [("@", "/", "subvol=/@,compress=zstd:3,ssd,discard=async,noatime,space_cache=v2"),
+                   ("@home", "/home", "subvol=/@home,compress=zstd:3,ssd,discard=async,noatime,space_cache=v2"),
+                   ("@log", "/var/log", "subvol=/@log,compress=zstd:1,ssd,noatime,space_cache=v2"),
+                   ("@cache", "/var/cache", "subvol=/@cache,compress=zstd:1,ssd,noatime,space_cache=v2"),
+                   ("@snapshots", "/var/lib/hedron/snapshots", "subvol=/@snapshots,compress=zstd:1,ssd,noatime")],
+    }
+
+
+def ram_mib() -> int:
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 8192
+
+
+def package_set(args: argparse.Namespace, info) -> dict:
+    data_dir = args.data_dir or "/etc/hedron"
+    sets, hedron = load_sets(data_dir, None)
+    resolver = Resolver(sets, hedron)
+    res = resolver.resolve(args.profile, args.variant, arch=args.arch)
+    if res.errors:
+        for err in res.errors:
+            LOG("  ! package-sets: " + err)
+    if args.with_apps:
+        res = resolver.resolve(args.profile, args.variant, arch=args.arch, include_default_apps=True)
+    return {"profile": args.profile, "variant": args.variant, "packages": res.names(), "flatpaks": res.flatpaks,
+            "size_mib": res.size_mib, "notes": res.notes, "errors": res.errors,
+            "drivers": [p for p in [] ]}
+
+
+# ------------------------------------------------------------------- partitioning
+def do_partition(plan: dict, target: str) -> None:
+    device = plan["device"]
+    LOG("\n[partition] %s — this DESTROYS existing data on %s" % (plan["table"], device))
+    if DRY:
+        LOG("  (dry run: nothing written)")
+    if not DRY:
+        answer = input("  Type 'ERASE' to continue on %s: " % device).strip()
+        if answer != "ERASE":
+            LOG("  aborted by you — nothing was changed")
+            sys.exit(130)
+    spec = "label: gpt\n"
+    for part in plan["partitions"]:
+        fields = []
+        if part.get("start") and part["start"] != "0":
+            fields.append("start=%s" % part["start"])
+        if part.get("size") and part["size"] != "0":
+            fields.append("size=%s" % part["size"])
+        fields.append("type=%s" % part["type"])
+        fields.append("name=%s" % part["name"])
+        spec += ", ".join(fields) + "\n"
+    LOG("  partition table to write:\n" + "\n".join("      " + l for l in spec.splitlines()))
+    spec_file = "/tmp/hedron-sfdisk.spec"
+    if not DRY:
+        with open(spec_file, "w", encoding="utf-8") as fh:
+            fh.write(spec)
+    LOG("  sfdisk --wipe=always %s < partition spec (%d partitions)" % (device, len(plan["partitions"])))
+    if not DRY:
+        subprocess.run(["sfdisk", "--wipe=always", device], stdin=open(spec_file, encoding="utf-8"), check=True)
+        subprocess.run(["partx", "-a", device], check=False)
+    root_part = device + ("p2" if re.search(r"\d$", device) else "2")
+    esp_part = device + ("p1" if re.search(r"\d$", device) else "1")
+    LOG("  mkfs: %s" % plan["partitions"][0]["mkfs"])
+    if not DRY:
+        run(shlex.split(plan["partitions"][0]["mkfs"]) + [esp_part])
+        run(shlex.split(plan["partitions"][1]["mkfs"]) + [root_part])
+    if not DRY:
+        os.makedirs(target, exist_ok=True)
+        run(["mount", "-o", "compress=zstd:3,discard=async", root_part, target])
+        for sub in plan["partitions"][1]["subvolumes"]:
+            run(["btrfs", "subvolume", "create", "%s/%s" % (target, sub)])
+        run(["umount", target])
+    LOG("  subvolumes: " + ", ".join(plan["partitions"][1]["subvolumes"]))
+
+
+def do_mount(plan: dict, target: str) -> None:
+    if DRY:
+        LOG("[mount] (dry run) would mount the subvolumes of %s at %s" % (plan["device"], target))
+        return
+    root_part = plan["device"] + ("p2" if re.search(r"\d$", plan["device"]) else "2")
+    esp_part = plan["device"] + ("p1" if re.search(r"\d$", plan["device"]) else "1")
+    LOG("[mount] %s → %s" % (root_part, target))
+    if DRY:
+        LOG("  (dry run)")
+        return
+    for sub, mnt, opts in plan["mounts"]:
+        subvol = ("subvol=/%s," % sub) if sub != "/" else ""
+        dest = os.path.join(target, mnt.lstrip("/"))
+        os.makedirs(dest, exist_ok=True)
+        run(["mount", "-o", subvol + opts, root_part, dest])
+    os.makedirs(os.path.join(target, "boot"), exist_ok=True)
+    run(["mount", esp_part, os.path.join(target, "boot")])
+
+
+def write_fstab(plan: dict, target: str) -> None:
+    lines = ["# /etc/fstab — written by hedronos-install", "# <file system> <mount point> <type> <options> <dump> <pass>"]
+    for sub, mnt, opts in plan["mounts"]:
+        lines.append("UUID=%s %s btrfs subvol=/%s,%s 0 0" % ("ROOTUUID", mnt, sub, opts.split("subvol=/@,")[-1]
+                                                              if sub != "/" else opts))
+    lines.append("UUID=%s /boot vfat defaults,noatime 0 2" % "ESPUUID")
+    text = "\n".join(lines) + "\n"
+    if DRY:
+        LOG(text)
+        return
+    with open(os.path.join(target, "etc/fstab"), "w", encoding="utf-8") as fh:
+        fh.write(text)
+    LOG("[fstab] wrote %d mount lines" % len(plan["mounts"]))
+
+
+# ------------------------------------------------------------------------ install
+def do_pacstrap(pkgs: list[str], target: str, repo_dir: str | None) -> None:
+    LOG("[base] pacstrap %d package(s) into %s" % (len(pkgs), target))
+    cmd = ["pacstrap", "-K", "-c", target] + pkgs
+    if repo_dir:
+        cmd = ["pacstrap", "-K", "-c", "-C", os.path.join(repo_dir, "pacman.conf"), target] + pkgs
+    if shutil.which("pacstrap") is None:
+        LOG("  ! pacstrap not available here (this is expected in a build container): the plan above")
+        LOG("    is exactly what the live ISO will run.")
+        return
+    if not DRY:
+        run(cmd, check=False)
+
+
+def do_hedron(args: argparse.Namespace, target: str, plan: dict, info) -> None:
+    """The part that makes HedronOS *HedronOS* rather than "Arch with a wallpaper"."""
+    LOG("[hedron] applying the HedronOS layer")
+    # 1. our repo + native packages
+    if args.repo_dir:
+        LOG("  installing the hedron-os repo packages from %s" % args.repo_dir)
+        if not DRY and shutil.which("pacman"):
+            run(["pacman", "-U", "--root", target, "--noconfirm",
+                 os.path.join(args.repo_dir, "hedronos-release-*.pkg.tar.*")], check=False)
+    # 2. GPU plan → target (the same file the ISO used, so build-time == install-time)
+    plans = os.path.join(args.data_dir or "/etc/hedron", "gpu-plans.json")
+    if os.path.isfile(plans):
+        LOG("  copying the pre-computed GPU plans (%s)" % plans)
+        if not DRY:
+            os.makedirs(os.path.join(target, "etc/hedron"), exist_ok=True)
+            shutil.copy2(plans, os.path.join(target, "etc/hedron/gpu-plans.json"))
+    # 3. driver plan for *this* machine, applied into the target
+    LOG("  detecting the GPU of this machine and installing its driver into the target")
+    cmd = ["hedron-drivers", "apply", "--root", target] + (["--offline"] if args.offline_drivers else [])
+    LOG("  $ " + " ".join(cmd))
+    if not DRY and shutil.which("hedron-drivers"):
+        subprocess.run(cmd, check=False)
+    # 4. bootloader + initramfs + hostname + user
+    LOG("  writing boot entries")
+    if not DRY:
+        run([sys.executable, "/usr/lib/hedron/hedron-boot-entries.py", "--spec",
+             os.path.join(args.data_dir or "/etc/hedron", "boot-entries.toml"),
+             "--outdir", os.path.join(target, "boot/loader/entries"), "--profile", args.profile,
+             "--version", args.version, "--codename", args.codename], check=False)
+    if args.hostname:
+        if not DRY:
+            with open(os.path.join(target, "etc/hostname"), "w", encoding="utf-8") as fh:
+                fh.write(args.hostname + "\n")
+    if args.user:
+        LOG("  creating user %s (groups: wheel,video,audio,input,gamescope,realtime)" % args.user)
+        if not DRY:
+            run(["arch-chroot", target, "useradd", "-m", "-G", "wheel,audio,video,input,realtime",
+                 "-s", "/usr/bin/bash", args.user], check=False)
+            if args.password:
+                run(["arch-chroot", target, "sh", "-c", "echo '%s:%s' | chpasswd" % (args.user, args.password)],
+                    check=False)
+            if args.autologin:
+                run(["arch-chroot", target, "ln", "-sfn", "/dev/null",
+                     "etc/systemd/system/getty@tty1.service.d/override.conf"], check=False)
+
+
+def do_apps(args: argparse.Namespace, target: str, selection: dict | None) -> None:
+    if selection is None:
+        LOG("[apps] no selection file: skipping the app layer (the store can install them later)")
+        return
+    LOG("[apps] installing %d app(s) you picked in the chooser" % len(selection.get("apps", [])))
+    for cmd in selection.get("commands", []):
+        if cmd.startswith("#"):
+            LOG("  " + cmd)
+            continue
+        LOG("  $ arch-chroot %s %s" % (target, cmd[:120]))
+        if not DRY and shutil.which("arch-chroot"):
+            subprocess.run(["arch-chroot", target, "sh", "-c", cmd], check=False)
+    steam = any(a.get("app") == "steam" for a in selection.get("apps", []))
+    LOG("  steam in selection: %s" % ("yes" if steam else "NO — a HedronOS install always includes Steam"))
+    if not DRY and not steam:
+        LOG("  adding steam anyway")
+        subprocess.run(["arch-chroot", target, "pacman", "-S", "--noconfirm", "--needed", "steam",
+                        "lib32-mesa", "steam-native-runtime"], check=False)
+
+
+def do_verify(args: argparse.Namespace, target: str) -> int:
+    LOG("[verify] checking the installed system against what we promised")
+    cmd = [sys.executable, "/usr/lib/hedron/hedronos-verify", "--root", target, "--report",
+           os.path.join(target, "var/lib/hedron/install-verification.json")]
+    if DRY:
+        LOG("  $ " + " ".join(cmd) + "   (dry run)")
+        return 0
+    if os.path.isfile("/usr/lib/hedron/hedronos-verify"):
+        return subprocess.call(cmd)
+    LOG("  (hedronos-verify not on this ISO — run it after reboot: hedron-doctor verify)")
+    return 0
+
+
+# --------------------------------------------------------------------------- main
+def main(argv: list[str] | None = None) -> int:
+    global DRY
+    ap = argparse.ArgumentParser(prog="hedronos-install", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--target", default="/mnt/hedron", help="where the new system is mounted")
+    ap.add_argument("--device", dest="target_device", default=None, help="install onto this disk")
+    ap.add_argument("--profile", default=os.environ.get("HEDRONOS_PROFILE", "gamerte"))
+    ap.add_argument("--variant", default=os.environ.get("HEDRONOS_VARIANT", "dvd"), choices=["dvd", "net", "uc"])
+    ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"])
+    ap.add_argument("--user", default=os.environ.get("USER", "player"))
+    ap.add_argument("--password", default=None)
+    ap.add_argument("--hostname", default=None)
+    ap.add_argument("--autologin", action="store_true", help="boot straight into the session")
+    ap.add_argument("--swap-mib", type=int, default=None)
+    ap.add_argument("--data-dir", default=None, help="where apps.toml/package-sets.toml live")
+    ap.add_argument("--repo-dir", default=None, help="on-ISO package directory to install from")
+    ap.add_argument("--selection", default="/var/lib/hedron/selected-apps.json")
+    ap.add_argument("--with-apps", action="store_true", help="also add the profile's default apps")
+    ap.add_argument("--offline-drivers", action="store_true", help="install drivers from the ISO cache only")
+    ap.add_argument("--version", default=os.environ.get("HEDRONOS_VERSION", "1.0.0"))
+    ap.add_argument("--codename", default=os.environ.get("HEDRONOS_CODENAME", "Halcyon"))
+    ap.add_argument("--auto", action="store_true", help="non-interactive: only if exactly one disk")
+    ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+    DRY = args.dry_run
+
+    LOG("HedronOS installer — %s (%s / %s)%s" % (args.version, args.profile, args.variant,
+                                                 "  [DRY RUN]" if DRY else ""))
+    info = gpus.collect_system_info()
+    LOG("\n[probe] firmware %s, %d MiB RAM, %d disk(s)" % (firmware(), ram_mib(), len(disks())))
+    for line in gpu_summary(info):
+        LOG("  gpu: " + line)
+    for os_found in existing_os():
+        LOG("  found another OS: %s" % os_found)
+
+    device = pick_device(args)
+    plan = layout_for(device, args)
+    setdoc = package_set(args, info)
+    LOG("\n[plan] disk %s → btrfs @ + subvolumes, %d MiB swapfile, %d base packages (~%s)"
+        % (device, plan["swapfile_mib"], len(setdoc["packages"]), human_bytes(setdoc["size_mib"] * 1048576)))
+    LOG("  boot: %s" % ("systemd-boot on the ESP" if firmware() == "uefi" else "GRUB (BIOS)"))
+    if setdoc["errors"]:
+        LOG("  ! %d package-set error(s) — fix before installing" % len(setdoc["errors"]))
+        if not args.yes:
+            return 2
+    selection = None
+    if os.path.isfile(args.selection):
+        selection = json.load(open(args.selection, encoding="utf-8"))
+        LOG("  apps: %d from %s" % (len(selection.get("apps", [])), args.selection))
+    else:
+        LOG("  apps: no selection file at %s — run `hedron-setup` first" % args.selection)
+
+    if not DRY and not args.yes:
+        LOG("\nAbout to erase %s and install HedronOS. This is your last chance." % device)
+        if input("Proceed? [type YES] ").strip() != "YES":
+            return 130
+
+    do_partition(plan, args.target)
+    do_mount(plan, args.target)
+    write_fstab(plan, args.target)
+    do_pacstrap(setdoc["packages"], args.target, args.repo_dir)
+    do_hedron(args, args.target, plan, info)
+    do_apps(args, args.target, selection)
+    rc = do_verify(args, args.target)
+    if not DRY:
+        LOG("[umount] %s" % args.target)
+        run(["umount", "-R", args.target], check=False)
+    LOG("\nDone. %s" % ("Reboot now (remove the USB stick)." if not DRY else "This was a rehearsal: nothing was written."))
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

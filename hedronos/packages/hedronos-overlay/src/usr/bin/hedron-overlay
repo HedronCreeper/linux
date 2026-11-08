@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# hedron-overlay — pick and manage HUD presets.  SPDX-License-Identifier: MIT
+#
+#   hedron-overlay list                    presets + which is active
+#   hedron-overlay use competitive         make a preset the active one (symlink, not copy)
+#   hedron-overlay next                    cycle forward through the presets (Meta+O)
+#   hedron-overlay show [preset]           print it (with the defaults merged in)
+#   hedron-overlay new mine --from competitive
+#   hedron-overlay edit [preset]           $EDITOR
+#   hedron-overlay game <app> mine         per-app override (matches the process name)
+#   hedron-overlay disable / enable        global kill switch for the whole HUD
+#   hedron-overlay export > file           the resolved config, for bug reports
+#
+# The "active" preset is a symlink in the user's config dir, so switching is atomic, and
+# `git add ~/.config/hedron/overlay.d` version-controls your tuning the same way it does
+# the rest of your dotfiles. That is the whole reason presets are plain files.
+set -euo pipefail
+
+SYSTEM_DIR=${HEDRON_OVERLAY_SYSTEM:-/etc/hedron/overlay.d}
+USER_DIR=${HEDRON_OVERLAY_USER:-$HOME/.config/hedron/overlay.d}
+ACTIVE=${HEDRON_OVERLAY_ACTIVE:-$HOME/.config/hedron/overlay-active}
+STATE=${HEDRON_OVERLAY_STATE:-$HOME/.config/hedron/overlay-state}
+
+cmd=${1:-list}
+[ $# -gt 0 ] && shift || true
+
+ensure_user() {
+	mkdir -p "$USER_DIR"
+	[ -f "$USER_DIR/README" ] || cat >"$USER_DIR/README" <<EOF
+Files here override $SYSTEM_DIR. The active preset is \$HOME/.config/hedron/overlay-active
+(symlink). Everything is MangoHud key=value syntax so it works under gamescope, KWin and
+MangoHud-loaded games alike.
+EOF
+}
+
+resolve_preset() {
+	local name=$1
+	for dir in "$USER_DIR" "$SYSTEM_DIR"; do
+		if [ -f "$dir/$name.conf" ]; then
+			printf '%s' "$dir/$name.conf"
+			return 0
+		fi
+	done
+	return 1
+}
+
+apply_preset() {
+	# Shared by `use` and `next` so the two paths cannot drift (the drift version of this bug is
+	# a keyboard shortcut that switches the symlink but not the per-app override).
+	local name=$1 file
+	file=$(resolve_preset "$name") || {
+		echo "no such preset: $name (hedron-overlay list)" >&2
+		return 1
+	}
+	ensure_user
+	ln -sfn "$file" "$ACTIVE"
+	echo "active overlay preset: $name ($file)"
+	echo "takes effect for newly launched games; for the current one press the preset toggle"
+}
+
+active_name() {
+	if [ -L "$ACTIVE" ]; then
+		basename "$(readlink "$ACTIVE")" .conf
+	elif [ -f "$ACTIVE" ]; then
+		cat "$ACTIVE"
+	else
+		printf 'competitive'
+	fi
+}
+
+preset_names() {
+	for dir in "$SYSTEM_DIR" "$USER_DIR"; do
+		[ -d "$dir" ] || continue
+		for f in "$dir"/*.conf; do
+			[ -f "$f" ] || continue
+			basename "$f" .conf
+		done
+	done | sort -u
+}
+
+case "$cmd" in
+next)
+	# Cycle forward. Re-exec `use` rather than duplicating it: the symlink semantics and the
+	# "newly launched games only" note have to stay identical between the two paths.
+	current=$(active_name)
+	mapfile -t all < <(preset_names)
+	[ "${#all[@]}" -gt 0 ] || { echo "no presets in $SYSTEM_DIR or $USER_DIR" >&2; exit 1; }
+	next=${all[0]}
+	for i in "${!all[@]}"; do
+		[[ ${all[$i]} == "$current" ]] && next=${all[((i + 1) % ${#all[@]})]}
+	done
+	apply_preset "$next"
+	;;
+list)
+	current=$(active_name)
+	printf '%-16s %-8s %s\n' PRESET SOURCE NOTE
+	for dir in "$SYSTEM_DIR" "$USER_DIR"; do
+		[ -d "$dir" ] || continue
+		for f in "$dir"/*.conf; do
+			[ -f "$f" ] || continue
+			name=$(basename "$f" .conf)
+			note=""
+			[ "$name" = "$current" ] && note="← active"
+			[ -f "$USER_DIR/$name.conf" ] && [ "$dir" = "$SYSTEM_DIR" ] && note="$note (overridden in user dir)"
+			printf '%-16s %-8s %s\n' "$name" "$(basename "$(dirname "$f")")" "$note"
+		done
+	done
+	echo
+	echo "per-app overrides:"
+	ls -1 "$USER_DIR"/game.*.conf 2>/dev/null | sed 's/.*game\.\(.*\)\.conf/  \1/' || echo "  (none)"
+	;;
+use)
+	[ $# -ge 1 ] || {
+		echo "usage: hedron-overlay use PRESET" >&2
+		exit 2
+	}
+	apply_preset "$1"
+	;;
+show)
+	name=${1:-$(active_name)}
+	file=$(resolve_preset "$name") || {
+		echo "no such preset: $name" >&2
+		exit 1
+	}
+	echo "# $file"
+	# Defaults from the shipped base file first, then the preset, so `show` is what a game sees.
+	[ -f "$SYSTEM_DIR/00-base.conf" ] && grep -v '^\s*#' "$SYSTEM_DIR/00-base.conf" | grep . || true
+	grep -v '^\s*#' "$file" | grep .
+	;;
+new)
+	[ $# -ge 1 ] || {
+		echo "usage: hedron-overlay new NAME [--from PRESET]" >&2
+		exit 2
+	}
+	name=$1
+	shift
+	from=competitive
+	[ "${1:-}" = "--from" ] && from=$2
+	ensure_user
+	target="$USER_DIR/$name.conf"
+	[ -e "$target" ] && {
+		echo "already exists: $target" >&2
+		exit 1
+	}
+	src=$(resolve_preset "$from") || {
+		echo "no such source preset: $from" >&2
+		exit 1
+	}
+	{
+		echo "# HedronOS overlay preset '$name', forked from '$from'."
+		echo "# SPDX-License-Identifier: MIT"
+		echo
+		cat "$src"
+	} >"$target"
+	echo "created $target"
+	;;
+edit)
+	name=${1:-$(active_name)}
+	ensure_user
+	target="$USER_DIR/$name.conf"
+	if [ ! -f "$target" ]; then
+		src=$(resolve_preset "$name") || {
+			echo "no such preset: $name" >&2
+			exit 1
+		}
+		cp "$src" "$target"
+		echo "(copied the system preset into $target so you are not editing a package file)"
+	fi
+	"${EDITOR:-nano}" "$target"
+	;;
+game)
+	[ $# -ge 2 ] || {
+		echo "usage: hedron-overlay game PROCESS PRESET" >&2
+		exit 2
+	}
+	app=$1
+	name=$2
+	file=$(resolve_preset "$name") || {
+		echo "no such preset: $name" >&2
+		exit 1
+	}
+	ensure_user
+	ln -sfn "$file" "$USER_DIR/game.$app.conf"
+	echo "$app → $name  ($USER_DIR/game.$app.conf)"
+	;;
+enable | disable)
+	ensure_user
+	if [ "$cmd" = disable ]; then
+		: >"$STATE.off"
+		rm -f "$STATE.on"
+		echo "HUD disabled for newly launched games (games already running keep theirs)"
+	else
+		: >"$STATE.on"
+		rm -f "$STATE.off"
+		echo "HUD enabled"
+	fi
+	;;
+export)
+	name=$(active_name)
+	file=$(resolve_preset "$name") || {
+		echo "no active preset resolvable" >&2
+		exit 1
+	}
+	echo "# HedronOS overlay export at $(date -Is), preset=$name"
+	if [ -f "$STATE.off" ]; then
+		echo "# NOTE: disabled globally by hedron-overlay disable"
+	fi
+	grep -v '^\s*#' "$file" | grep .
+	per=$(find "$USER_DIR" -maxdepth 1 -name 'game.*.conf' 2>/dev/null || true)
+	if [ -n "$per" ]; then
+		echo "# per-app overrides:"
+		for f in $per; do
+			echo "$(basename "$f" .conf | sed 's/^game\./# /') $(readlink -f "$f")"
+		done
+	fi
+	;;
+*)
+	echo "usage: hedron-overlay list|use PRESET|show [P]|new NAME [--from P]|edit [P]|game APP P|enable|disable|export" >&2
+	exit 2
+	;;
+esac

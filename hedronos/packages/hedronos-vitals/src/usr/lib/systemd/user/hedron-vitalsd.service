@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS vitals sampler (single reader of /sys for every HUD)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedron-vitalsd.py
+Restart=on-failure
+RestartSec=4
+# Reading hwmon does not need root, and this must not be able to write anything at all.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=96M
+RuntimeDirectory=hedron
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target

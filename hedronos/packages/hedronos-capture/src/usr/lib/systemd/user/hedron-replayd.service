@@ -1,0 +1,28 @@
+[Unit]
+Description=HedronOS instant-replay ring buffer
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+PartOf=graphical-session.target
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedron-replayd.py
+Restart=on-failure
+RestartSec=5
+# Started by the session (autostart) and only while a game claims the machine, so it must
+# never outrank the game for encoder or disk bandwidth.
+Nice=5
+IOSchedulingClass=idle
+# Recording needs the compositor's dmabufs and the render node, nothing else.
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/hedron %h/Videos
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service @debug
+MemoryMax=1G
+
+[Install]
+WantedBy=graphical-session.target

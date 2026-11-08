@@ -1,0 +1,25 @@
+# HedronOS app store.  SPDX-License-Identifier: MIT
+[store]
+# Where the signed index comes from. A mirror list is *not* parsed here: we fetch from the
+# first entry `hedronctl mirrors` picks, which keeps one mirror policy for the whole system.
+mirror = "https://mirror.hedronos.local/hedron-os"
+index = "/var/lib/hedron/store/index.json"
+auto_refresh_hours = 24
+
+# Signatures: a store index that cannot be verified must not silently install anything.
+# `allow_unverified = true` is for your own build machine, not a default.
+allow_unverified = false
+require_signature_env = "HEDRON_STORE_REQUIRE_SIGNATURE"
+
+# Which remote flatpak uses, and which AUR helper we call (we do not implement AUR ourselves).
+flatpak_remote = "flathub"
+aur_helper = "yay"
+
+# Use the on-ISO cache under /var/cache/hedron/store when the network is down.
+offline_ok = true
+
+# Ask before removing (a store that deletes things without asking is the #1 UI complaint).
+confirm_removals = true
+
+# Take a hedron-rollback snapshot before applying a transaction. Costs ~1 s, saves a weekend.
+rollback_snapshots = true

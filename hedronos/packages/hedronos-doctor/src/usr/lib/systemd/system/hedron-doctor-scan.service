@@ -1,0 +1,25 @@
+# Weekly health scan. SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS doctor: scan this machine and cache the result
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=systemd-journald systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+# On a timer, not on boot: a scan at boot competes with the game you are launching, and none of
+# the findings change in the first 60 seconds after power-on.
+Environment=HEDRON_STATE_DIR=/var/lib/hedron
+ExecStart=/usr/bin/hedron-doctor scan --json
+ExecStartPost=/usr/bin/sh -c 'if grep -q "\"errors\": [1-9]" /var/lib/hedron/doctor/last-scan.json 2>/dev/null; then /usr/bin/hedron-notify "HedronOS needs attention" "hedron-doctor found problems — run: hedron-doctor status" 2>/dev/null || true; fi'
+# Read-only by design; the only write is the scan cache. (sysfs/proc are not writable anyway, and
+# `fix` is a separate, human-invoked command.)
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=yes
+NoNewPrivileges=yes
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

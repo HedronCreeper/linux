@@ -1,0 +1,51 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/overlay.d/competitive.conf"
+ ],
+ "conflicts": [],
+ "depends": [
+  "bash",
+  "coreutils",
+  "findutils"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/hedron",
+  "/etc/hedron/overlay.d",
+  "/usr",
+  "/usr/bin"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-overlay-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/hedron/",
+  "/etc/hedron/overlay.d/",
+  "/etc/hedron/overlay.d/00-base.conf",
+  "/etc/hedron/overlay.d/competitive.conf",
+  "/etc/hedron/overlay.d/handheld.conf",
+  "/etc/hedron/overlay.d/minimal.conf",
+  "/etc/hedron/overlay.d/streamer.conf",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-overlay"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-overlay",
+ "optional": [
+  "mangohud",
+  "gamescope"
+ ],
+ "provides": [
+  "hedronos-hud"
+ ],
+ "release": "1",
+ "services_enable": [],
+ "size": 0,
+ "summary": "Overlay presets (competitive/streamer/minimal/handheld) with per-app overrides",
+ "units": [],
+ "version": "1.0.0"
+}

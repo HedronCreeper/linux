@@ -1,0 +1,83 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/store.toml",
+  "/etc/pacman.d/hedron-os.conf"
+ ],
+ "conflicts": [],
+ "depends": [
+  "python",
+  "bash",
+  "curl",
+  "systemd-libs"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/hedron",
+  "/etc/pacman.d",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/python3.13/site-packages",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/user",
+  "/usr/share",
+  "/usr/share/applications",
+  "/usr/share/hedron",
+  "/usr/share/hedron/store",
+  "/usr/share/metainfo"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-store-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/hedron/",
+  "/etc/hedron/store.toml",
+  "/etc/pacman.d/",
+  "/etc/pacman.d/hedron-os.conf",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hstore",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedrostd.py",
+  "/usr/lib/python3.13/site-packages/hedronlib",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/user/",
+  "/usr/lib/systemd/user/hedrostd.service",
+  "/usr/lib/systemd/user/hedrostd.socket",
+  "/usr/share/",
+  "/usr/share/applications/",
+  "/usr/share/applications/hedron-store.desktop",
+  "/usr/share/hedron/",
+  "/usr/share/hedron/store/",
+  "/usr/share/hedron/store/Store.qml",
+  "/usr/share/metainfo/",
+  "/usr/share/metainfo/hedron-store.appdata.xml"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-store",
+ "optional": [
+  "pacman",
+  "flatpak",
+  "yay",
+  "qml6",
+  "kirigami2",
+  "package-query"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [
+  "hedrostd.socket"
+ ],
+ "size": 0,
+ "summary": "HedronOS app store: signed cross-backend index, transactions, undo, GUI and CLI",
+ "units": [
+  "usr/lib/systemd/user/hedrostd.service",
+  "usr/lib/systemd/user/hedrostd.socket"
+ ],
+ "version": "1.0.0"
+}

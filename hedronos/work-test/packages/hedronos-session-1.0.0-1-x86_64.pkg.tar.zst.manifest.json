@@ -1,0 +1,62 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/session.conf"
+ ],
+ "conflicts": [],
+ "depends": [
+  "python",
+  "bash",
+  "dbus-tools"
+ ],
+ "dirs": [
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/share",
+  "/usr/share/wayland-sessions",
+  "/usr/share/xsessions"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-session-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-session",
+  "/usr/bin/hedron-session-query",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedron-session-bridge",
+  "/usr/share/",
+  "/usr/share/wayland-sessions/",
+  "/usr/share/wayland-sessions/hedron-deck.desktop",
+  "/usr/share/wayland-sessions/hedron-gamescope.desktop",
+  "/usr/share/xsessions/",
+  "/usr/share/xsessions/hedron-x11.desktop"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-session",
+ "optional": [
+  "kwin",
+  "plasma-workspace",
+  "gamescope",
+  "kdotool",
+  "xdotool",
+  "hyprland",
+  "sway"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [
+  "hedron-session-bridge.service"
+ ],
+ "size": 0,
+ "summary": "Session launcher, focus bridge and HDR plumbing for KDE, gamescope and wlroots",
+ "units": [
+  "usr/lib/systemd/user/hedron-session-bridge.service"
+ ],
+ "version": "1.0.0"
+}

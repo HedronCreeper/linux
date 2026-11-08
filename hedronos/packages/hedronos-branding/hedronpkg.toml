@@ -1,0 +1,40 @@
+# hedronos-branding — visual identity from bootloader to desktop. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-branding"
+version = "1.0.0"
+release = "1"
+summary = "HedronOS visual identity: vector wallpapers, Plymouth splash, GRUB theme, branding API"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT", "CC0-1.0"]
+arch = ["any"]
+groups = ["hedronos"]
+
+[depends]
+runtime = ["bash"]
+build = ["python"]
+check = ["python"]
+optional = ["plymouth", "grub", "dosfstools"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/lib/hedron/hedron-branding" = "0755"
+"etc/grub.d/00_header" = "0755"
+"etc/plymouth/plymouthd.conf" = "0644"
+"etc/issue" = "0644"
+"etc/issue.net" = "0644"
+"usr/share/hedron/branding/branding.json" = "0644"
+"usr/share/hedron/grub/grub.env" = "0644"
+"usr/share/hedron/grub/theme.txt" = "0644"
+"usr/share/plymouth/themes/hedronos/hedronos.plymouth" = "0644"
+"usr/share/plymouth/themes/hedronos/hedronos.script" = "0644"
+"usr/share/licenses/hedronos/README.md" = "0644"
+"README.md" = "0644"
+
+[files]
+preserve = ["/etc/plymouth/plymouthd.conf", "/etc/issue", "/etc/issue.net", "/etc/grub.d/00_header"]
+conflict = [{ path = "/usr/share/plymouth/themes/hedronos/hedronos.plymouth", message = "another package owns the Plymouth theme directory" }, { path = "/etc/issue", message = "/etc/issue belongs to hedronos-branding; getty would overwrite the banner" }]
+
+[tests]
+modules = ["tests/test_branding_assets.py"]

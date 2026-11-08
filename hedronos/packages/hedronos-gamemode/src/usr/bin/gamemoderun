@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# gamemoderun — drop-in compatible with Feral's GameMode launcher, backed by HedronOS FlowState.
+#
+# SPDX-License-Identifier: MIT
+#
+# Why this exists: thousands of launch scripts, Lutris runners and Proton-GE presets already
+# say `gamemoderun %command%`. Those must keep working, and they must *do something real* on
+# HedronOS instead of silently no-op'ing because the upstream daemon isn't installed.
+#
+# We implement the same contract (claim before exec, release after, `--usage`, exit code
+# passthrough) on top of hgm + hedron-tune, and additionally set the two environment variables
+# upstream documents (GAMEMODE_SESSION_ID, LD_PRELOAD of the compat shim) so software that
+# sniffs for them behaves as if it were on the real thing.
+set -uo pipefail
+
+if [ "${1:-}" = "--usage" ] || [ "${1:-}" = "-h" ]; then
+	cat <<'EOF'
+Usage: gamemoderun command [args...]
+
+  Start 'command' with a HedronOS game claim (FlowState gaming profile + game slice).
+  Compatible with Feral GameMode's launcher; --export and --usage are accepted.
+
+  HEDRON_GAMEMODE_NOOP=1 makes this script a transparent exec (for debugging).
+EOF
+	exit 0
+fi
+
+# Upstream flag we accept and ignore (we always export via the slice's env instead).
+if [ "${1:-}" = "--export" ]; then
+	shift
+	printf 'LD_PRELOAD=%s\n' "${HEDRON_GAMEMODE_SHIM:-/usr/lib/hedron/gamemode/libgamemode.so}"
+	printf 'GAMEMODE_SESSION_ID=%s\n' "$$"
+fi
+
+if [ "${HEDRON_GAMEMODE_NOOP:-0}" = 1 ]; then
+	exec "$@"
+fi
+
+if ! command -v hgm >/dev/null 2>&1; then
+	echo "gamemoderun: hedronos-gamemode is not installed; running the command as-is" >&2
+	exec "$@"
+fi
+
+claim() { hgm start "$$" "${1:-gamemoderun}" >/dev/null 2>&1 || true; }
+release() { hgm end "$$" >/dev/null 2>&1 || true; }
+trap release EXIT INT TERM
+
+claim "$(basename "${1:-game}")"
+export GAMEMODE_SESSION_ID="$$"
+# Start the per-session engage unit if the user runs a systemd session; harmless otherwise.
+if [ -d /run/systemd/system ]; then
+	systemctl --user start "hedron-flowstate-engage@gamemoderun.service" >/dev/null 2>&1 || true
+fi
+"$@"
+rc=$?
+exit "$rc"

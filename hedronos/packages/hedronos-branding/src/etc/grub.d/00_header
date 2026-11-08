@@ -1,0 +1,20 @@
+#!/bin/sh
+# HedronOS GRUB header for BIOS installs. SPDX-License-Identifier: MIT
+# systemd-boot is the default (see hedronos-release); this exists because ~8 % of machines still
+# boot legacy, and those users deserve the same splash and the same default options.
+set -e
+. /usr/share/hedron/grub/grub.env
+
+cat << END
+set default="\${saved_entry}"
+set timeout=${GRUB_TIMEOUT}
+terminal_output gfxterm
+background_image ${GRUB_BACKGROUND}
+END
+
+# "Quiet boot, loud failure": hide the menu unless something is wrong, but never hide it after a
+# failed boot — a machine that will not show its menu after a bad update is a machine with no
+# recovery path.
+if [ -e /run/grub/force-menu ]; then
+    echo "set timeout=-1"
+fi

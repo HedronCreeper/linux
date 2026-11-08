@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# hedron-notify — one notification, from anywhere, including a system unit with no session bus.
+#
+# Why this exists: half of the useful things HedronOS has to tell you happen in system context
+# (hedron-tune's FlowState edges, the doctor's timer, hedron-drivers after a driver install). A
+# root-side service has no $DBUS_SESSION_BUS_ADDRESS, so a bare `notify-send` there is silently
+# dropped — and a message that vanishes is worse than no message, because it teaches people that
+# the distro's notifications are decoration.
+#
+# We resolve the *active graphical session* through loginctl, then talk to that user's bus. If
+# there is no session (VT only, or the compositor has not started yet) we write to the journal
+# and exit 0: a notification is advisory, it must never fail a service.
+#
+#   hedron-notify "title" "body" [-u low|normal|critical] [-a app] [-t ms]
+# SPDX-License-Identifier: MIT
+set -uo pipefail
+
+URGENCY=${URGENCY:-normal}
+APP=${HEDRON_NOTIFY_APP:-HedronOS}
+TIMEOUT=${HEDRON_NOTIFY_TIMEOUT:-8000}
+ICON=""
+
+title=${1:-}
+body=${2:-}
+shift 2 2>/dev/null || true
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u|--urgency) URGENCY=${2:-normal}; shift 2 ;;
+        -a|--app) APP=${2:-HedronOS}; shift 2 ;;
+        -i|--icon) ICON=${2:-}; shift 2 ;;
+        -t|--timeout) TIMEOUT=${2:-8000}; shift 2 ;;
+        *) [ -z "$body" ] && body=$1 || body="$body $1"; shift ;;
+    esac
+done
+[ -n "$title" ] || { echo "usage: hedron-notify TITLE [BODY] [-u urgency] [-i icon] [-t ms]" >&2; exit 2; }
+
+send_via_bus() {
+    local uid=$1
+    local bus=/run/user/$uid/bus
+    [ -S "$bus" ] || return 1
+    if ! command -v notify-send >/dev/null 2>&1; then
+        # No libnotify: speak D-Bus directly. Busctl is part of systemd, which this system has.
+        command -v busctl >/dev/null 2>&1 || return 1
+        DBUS_SESSION_BUS_ADDRESS=unix:path=$bus busctl --user call org.freedesktop.Notifications \
+            /org/freedesktop/Notifications org.freedesktop.Notifications Notify \
+            sussaas "$APP" "0" "${ICON:-hedron-os}" "$title" "$body" "as 0" "a{sv} 0" "i $TIMEOUT" >/dev/null
+        return $?
+    fi
+    DBUS_SESSION_BUS_ADDRESS=unix:path=$bus notify-send --app-name="$APP" --urgency="$URGENCY" \
+        ${ICON:+--icon="$ICON"} --expire-time="$TIMEOUT" -- "$title" "$body"
+}
+
+# Prefer the caller's own session (hedron-notify is often run by a user from a terminal).
+uid=$(id -u)
+if send_via_bus "$uid"; then exit 0; fi
+
+# Otherwise find whoever actually owns the screen. `timedatectl`-style: ask logind, do not guess.
+if command -v loginctl >/dev/null 2>&1; then
+    for session_uid in $(loginctl list-sessions --no-legend 2>/dev/null | awk 'NR==1{print $3}'); do
+        [ -n "$session_uid" ] || continue
+        [ "$session_uid" = "$uid" ] && continue
+        if send_via_bus "$session_uid"; then exit 0; fi
+    done
+fi
+
+if command -v wall >/dev/null 2>&1; then
+    { printf 'HedronOS: %s' "$title"; [ -n "$body" ] && printf ' — %s' "$body"; printf '\n'; } \
+        | wall >/dev/null 2>&1 || true
+fi
+if command -v systemd-cat >/dev/null 2>&1; then
+    systemd-cat -t hedron-notify -p info printf '%s — %s' "$title" "$body"
+else
+    logger -t hedron-notify -- "$title — $body" 2>/dev/null || true
+fi
+echo "hedron-notify: no desktop session to notify (journal only): $title" >&2
+exit 0

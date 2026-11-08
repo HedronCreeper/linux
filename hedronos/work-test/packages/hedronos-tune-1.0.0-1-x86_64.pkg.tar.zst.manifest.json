@@ -1,0 +1,95 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/flowstate.d/30-gaming.toml",
+  "/etc/hedron/flowstate.conf"
+ ],
+ "conflicts": [],
+ "depends": [
+  "python",
+  "cpupower",
+  "procps-ng",
+  "kmod",
+  "systemd"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/hedron",
+  "/etc/hedron/flowstate.d",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/hedron",
+  "/usr/lib/python3.13/site-packages",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/system",
+  "/usr/lib/systemd/system/user@.service.d",
+  "/usr/lib/systemd/user",
+  "/usr/lib/tmpfiles.d",
+  "/usr/src"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-tune-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/hedron/",
+  "/etc/hedron/flowstate.conf",
+  "/etc/hedron/flowstate.d/",
+  "/etc/hedron/flowstate.d/10-base.toml",
+  "/etc/hedron/flowstate.d/20-balanced.toml",
+  "/etc/hedron/flowstate.d/25-battery.toml",
+  "/etc/hedron/flowstate.d/25-silence.toml",
+  "/etc/hedron/flowstate.d/30-gaming.toml",
+  "/etc/hedron/flowstate.d/30-handheld.toml",
+  "/etc/hedron/flowstate.d/30-studio.toml",
+  "/etc/hedron/flowstate.d/35-performance.toml",
+  "/etc/hedron/flowstate.d/60-overlay-amd.toml",
+  "/etc/hedron/flowstate.d/60-overlay-handheld.toml",
+  "/etc/hedron/flowstate.d/60-overlay-intel.toml",
+  "/etc/hedron/flowstate.d/60-overlay-laptop.toml",
+  "/etc/hedron/flowstate.d/60-overlay-nvidia.toml",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-tune",
+  "/usr/lib/",
+  "/usr/lib/hedron/",
+  "/usr/lib/hedron/hedronflowd.py",
+  "/usr/lib/python3.13/site-packages/hedronlib",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/system/",
+  "/usr/lib/systemd/system/hedron-flowstate-apply@.service",
+  "/usr/lib/systemd/system/hedron-flowstate.service",
+  "/usr/lib/systemd/system/user@.service.d/",
+  "/usr/lib/systemd/system/user@.service.d/delegate.conf",
+  "/usr/lib/systemd/system/user@.service.d/hedron-slice.conf",
+  "/usr/lib/systemd/user/",
+  "/usr/lib/systemd/user/hedron-game.slice",
+  "/usr/lib/tmpfiles.d/",
+  "/usr/lib/tmpfiles.d/hedron-tune.conf",
+  "/usr/src/",
+  "/usr/src/hedron-latency.c"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-tune",
+ "optional": [
+  "zram-generator",
+  "irqbalance",
+  "power-profiles-daemon"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [
+  "hedron-flowstate.service",
+  "hedron-flowstate-apply@.service"
+ ],
+ "size": 0,
+ "summary": "FlowState: transactional CPU/GPU/scheduler tuning with per-app activation and rollback",
+ "units": [
+  "usr/lib/systemd/system/hedron-flowstate.service",
+  "usr/lib/systemd/system/hedron-flowstate-apply@.service",
+  "usr/lib/systemd/system/user@.service.d/hedron-slice.conf"
+ ],
+ "version": "1.0.0"
+}

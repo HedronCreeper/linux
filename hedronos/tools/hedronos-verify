@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""hedronos-verify — run the whole HedronOS self-check and report on it.
+
+  hedronos-verify                     everything (slow: it re-runs the generator and a dry-run build)
+  hedronos-verify --fast            skip the two slow groups (build rehearsal, regeneration)
+  hedronos-verify --only units,features
+  hedronos-verify --json --report work/manifest/verification-report.json
+  hedronos-verify --list            show the groups and what each one proves
+
+Exit status: 0 all good, 1 something failed, 3 an internal error. `build.sh --verify-only`
+and `make verify` both call this, so there is exactly one definition of "the tree is sane".
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if os.path.isdir(os.path.join(_HERE, "hedronlib")):
+    sys.path.insert(0, _HERE)
+else:  # invoked from an installed tree (rare, but the package ships a copy)
+    sys.path.insert(0, "/usr/lib/python3.13/site-packages")
+
+from hedronlib.util import Check  # noqa: E402,F401
+from hedronlib.verify import CHECKS, Context, run_all, summarise  # noqa: E402
+
+FAST_SKIP = ("build", "regeneration", "tests")
+
+
+def colour(text: str, code: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return "\033[%sm%s\033[0m" % (code, text)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedronos-verify", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", default=os.path.dirname(_HERE),
+                    help="the hedronos/ directory to verify (default: this file's parent)")
+    ap.add_argument("--work", default=None, help="work directory (default: <root>/work)")
+    ap.add_argument("--kernel", default=None, help="kernel tree to read Kconfig/PCI ids from")
+    ap.add_argument("--only", default=None, help="comma list of check groups to run")
+    ap.add_argument("--skip", default=None, help="comma list of check groups to skip")
+    ap.add_argument("--fast", action="store_true", help="skip the slow groups (build, regen, unit tests)")
+    ap.add_argument("--json", action="store_true", help="machine-readable report on stdout")
+    ap.add_argument("--report", default=None, help="also write the JSON report to this path")
+    ap.add_argument("--list", action="store_true", help="list check groups and exit")
+    ap.add_argument("--strict", action="store_true", help="warnings also fail the run")
+    ap.add_argument("--quiet", action="store_true", help="only print the summary line")
+    ap.add_argument("--no-colour", action="store_true")
+    args = ap.parse_args(argv)
+
+    if args.list:
+        for group, fn in CHECKS:
+            doc = (fn.__doc__ or "").strip().splitlines()
+            print("%-16s %s" % (group, doc[0] if doc else ""))
+        return 0
+
+    only = [g.strip() for g in args.only.split(",")] if args.only else None
+    skip = [g.strip() for g in args.skip.split(",")] if args.skip else []
+    if args.fast:
+        skip = sorted(set(skip) | set(FAST_SKIP))
+
+    ctx = Context(root=args.root, work=args.work, kernel=args.kernel)
+    started = time.time()
+    checks = run_all(ctx, only=only, skip=skip)
+    duration = time.time() - started
+    stats = summarise(checks)
+
+    use_colour = sys.stdout.isatty() and not args.no_colour
+    if not args.json and not args.quiet:
+        print("HedronOS verification of %s" % args.root)
+        print("checks: %d, %s, %.1fs\n" % (stats["total"],
+              ", ".join("%d %s" % (v, k) for k, v in stats.items() if k != "total" and v), duration))
+        for check in checks:
+            mark = "PASS" if check.ok else ("WARN" if check.severity == "warn" else "FAIL")
+            code = {"PASS": "32", "WARN": "33", "FAIL": "31"}[mark]
+            print("%s %s" % (colour("%-4s" % mark, code, use_colour), check.name))
+            if check.detail and not args.quiet:
+                print("     %s" % check.detail.replace("\n", "\n     "))
+            if not check.ok and check.hint:
+                print("     %s" % colour("→ " + check.hint.replace("\n", "\n  "), "36", use_colour))
+        print()
+    failed = stats["failed"] + (stats["warnings"] if args.strict else 0)
+    summary = "%d check(s): %d passed, %d failed, %d warning(s) in %.1fs%s" % (
+        stats["total"], stats["passed"], stats["failed"], stats["warnings"], duration,
+        "  (--fast: %s skipped)" % ", ".join(FAST_SKIP) if args.fast else "")
+    print(colour(summary, "31" if failed else "32", use_colour))
+
+    if args.json or args.report:
+        payload = {"format": "hedron-verification-1", "root": os.path.abspath(args.root),
+                   "started": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)),
+                   "duration_s": round(duration, 2), "stats": stats, "fast": args.fast,
+                   "skipped": skip, "only": only,
+                   "checks": [c.as_dict() for c in checks],
+                   "ok": failed == 0}
+        if args.json:
+            print(json.dumps(payload, indent=1, sort_keys=True))
+        if args.report:
+            os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
+            tmp = args.report + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=1, sort_keys=True)
+            os.replace(tmp, args.report)
+            if not args.json:
+                print("report written to %s" % args.report)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except RecursionError as exc:  # pragma: no cover
+        print("hedronos-verify: internal error: %s" % exc, file=sys.stderr)
+        raise SystemExit(3)

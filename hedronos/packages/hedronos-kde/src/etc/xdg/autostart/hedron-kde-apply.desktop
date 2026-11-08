@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=HedronOS KDE defaults
+Comment=Apply the distro's compositor and colour defaults to this user's config
+Exec=/usr/bin/hedron-kde-apply apply
+Terminal=false
+Icon=preferences-desktop
+Categories=Qt;KDE;Settings;
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+X-KDE-autostart-phase=1

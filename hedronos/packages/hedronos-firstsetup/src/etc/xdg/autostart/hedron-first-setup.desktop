@@ -1,0 +1,13 @@
+# Autostarts once, then removes itself: the first login should show the store, not a wiki.
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=HedronOS first setup
+Comment=Finish driver setup and open the store once on first login
+Exec=/usr/lib/hedron/hedron-firstboot.py --from-login
+Terminal=false
+Icon=preferences-system
+Categories=System;Settings;
+X-GNOME-Autostart-Phase=Applications
+X-KDE-autostart-phase=2
+NoDisplay=false

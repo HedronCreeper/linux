@@ -1,0 +1,61 @@
+{
+ "arch": "x86_64",
+ "backup": [
+  "/etc/hedron/doctor.conf"
+ ],
+ "conflicts": [],
+ "depends": [
+  "bash",
+  "python",
+  "systemd",
+  "util-linux"
+ ],
+ "dirs": [
+  "/etc",
+  "/etc/hedron",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/systemd",
+  "/usr/lib/systemd/system"
+ ],
+ "dry_run": true,
+ "filename": "hedronos-doctor-1.0.0-1-x86_64.pkg.tar.zst",
+ "files": [
+  "/etc/",
+  "/etc/hedron/",
+  "/etc/hedron/doctor.conf",
+  "/usr/",
+  "/usr/bin/",
+  "/usr/bin/hedron-doctor",
+  "/usr/lib/",
+  "/usr/lib/systemd/",
+  "/usr/lib/systemd/system/",
+  "/usr/lib/systemd/system/hedron-doctor-scan.service",
+  "/usr/lib/systemd/system/hedron-doctor-scan.timer"
+ ],
+ "license": [
+  "MIT"
+ ],
+ "name": "hedronos-doctor",
+ "optional": [
+  "pacman",
+  "lsinitcpio",
+  "vulkan-icd-loader",
+  "hedronos-drivers",
+  "hedronos-tune",
+  "hedronos-store"
+ ],
+ "provides": [],
+ "release": "1",
+ "services_enable": [
+  "hedron-doctor-scan.timer"
+ ],
+ "size": 0,
+ "summary": "HedronOS health checks: driver/initramfs/unit/store verification, ordered fixes, redacted bug reports, bench",
+ "units": [
+  "usr/lib/systemd/system/hedron-doctor-scan.service",
+  "usr/lib/systemd/system/hedron-doctor-scan.timer"
+ ],
+ "version": "1.0.0"
+}

@@ -1,0 +1,14 @@
+{
+  "SPDX-License-Identifier": "MIT",
+  "KPackageStructure": "KWin/Script",
+  "Id": "hedron-keys",
+  "Name": "HedronOS desktop keys",
+  "Comment": "HDR, overlay preset and brightness keys for the desktop session",
+  "Icon": "preferences-desktop-keyboard-shortcuts",
+  "Main": "main.js",
+  "Website": "https://github.com/HedronCreeper/linux/tree/master/hedronos",
+  "Email": "build@hedronos.local",
+  "License": "MIT",
+  "Version": "1.0.0",
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

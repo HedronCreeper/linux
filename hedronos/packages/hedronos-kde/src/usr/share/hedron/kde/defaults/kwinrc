@@ -1,0 +1,62 @@
+# KWin defaults for HedronOS.  SPDX-License-Identifier: MIT
+#
+# Written to ~/.config/kwinrc by `hedron-kde-apply` (it merges, never clobbers). Everything here
+# exists to remove compositor work between the game and the scanout, or to make the compositor
+# stop guessing about latency.
+[Compositing]
+Enabled=true
+GLCoreContext=true
+OpenGLIsUnsafe=false
+# Unredirect on fullscreen: the single biggest compositor saving for exclusive-ish games.
+UnredirectFullscreen=true
+# No animation frame between "game exits" and "desktop is up" — that flicker reads as a crash.
+AnimationSpeed=0
+
+[Plugins]
+kwin4_effect_fadedesktop_enabled=false
+coverwindow_enabled=false
+windowview_enabled=true
+magpie_enabled=false
+# Vitals draws its own HUD; the compositor's built-in screen shooter is what people mistake for
+# a black frame when they press PrtSc in a game.
+screenshot_enabled=true
+forceblur_enabled=true
+blur_enabled=true
+corners_enabled=false
+desktopgrid_enabled=true
+slide_enabled=false
+zoom_enabled=true
+
+[Effect-Blur]
+BlurStrength=60
+NoiseStrength=0.02
+ScreenshotAllowBlur=false
+
+[Effect-Fade]
+FadeInTime=90
+FadeOutTime=60
+
+[ElectronicGarbageCollector]
+Enabled=false
+
+[TabBox]
+ActivitiesAreDesktops=false
+BorderActiveColor=80,190,145
+BorderAlternateActiveColor=80,190,145
+LayoutName=thumbnail_grid
+
+[Windows]
+ActiveMouseCycle=ClickToFocus
+AutomaticPlacement=false
+# Focus follows mouse makes a game with an overlay impossible to play sanely.
+DelayFocusInOut=0
+FocusPolicy=ClickToFocus
+ShowDesktopMenu=false
+RollOverDesktops=true
+NextFocusPrefersMouse=false
+
+[Notification Messages]
+compositingPossible=false
+compositingNotPossible=false
+compositingPerformanceWarning=false
+lockActivityOptions=false

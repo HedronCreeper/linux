@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""hedron-session — start, identify and bridge the graphical session.
+
+  hedron-session which          what am I running (compositor, renderer, seat, HDR state)
+  hedron-session start deck     gamescope session on the current seat
+  hedron-session start plasma   normal KDE session, with our env + slice
+  hedron-session bridge on|off  the FlowState focus bridge (this is what makes game
+                                detection work without a display-manager integration)
+  hedron-session hdr on|off     negotiate HDR output (requires the kernel/KWin support we ship)
+  hedron-session doctor         the two things that break sessions, checked in 200 ms
+
+The `which` output is the single source of truth other HedronOS tools use to decide whether
+they can talk to the compositor at all — instead of each tool probing in its own way and
+each getting it slightly wrong.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", os.path.join(_HERE, "..", "lib")):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")) and _cand not in sys.path:
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(8):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+
+BRIDGE_ON = os.path.expanduser("~/.config/hedron/bridge-enabled")
+ENV_FILE = os.path.expanduser("~/.config/environment.d/60-hedron-session.conf")
+
+
+def read(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def env(key: str, default: str = "") -> str:
+    return os.environ.get(key, default)
+
+
+def probe() -> dict:
+    out = {
+        "type": env("XDG_SESSION_TYPE", "unknown"),
+        "desktop": env("XDG_CURRENT_DESKTOP", "unknown"),
+        "compositor": "unknown",
+        "gamescope": False,
+        "seat": env("XDG_SEAT", "seat0"),
+        "vtnr": env("XDG_VTNR", ""),
+        "runtime": env("XDG_RUNTIME_DIR", ""),
+        "pipewire": bool(shutil.which("pw-dump") and os.path.exists(os.path.join(env("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "pipewire-0"))),
+        "flatpak": shutil.which("flatpak") is not None,
+        "bridge": os.path.isfile(BRIDGE_ON),
+        "autologin": read("/etc/systemd/system/getty@tty1.service.d/override.conf").find("autologin") >= 0,
+    }
+    if os.environ.get("USE_GAMESCOPE") or read("/run/hedron/gamescope-session"):
+        out["compositor"] = "gamescope"
+        out["gamescope"] = True
+    elif "KDE" in out["desktop"] or shutil.which("kwin_x11") or shutil.which("kwin_wayland"):
+        out["compositor"] = "kwin"
+    elif "GNOME" in out["desktop"]:
+        out["compositor"] = "mutter"
+    elif "Hyprland" in out["desktop"] or shutil.which("hyprland"):
+        out["compositor"] = "hyprland"
+    elif "river" in out["desktop"] or shutil.which("river"):
+        out["compositor"] = "river"
+    # HDR: the kernel exposes the connector's metadata; KWin 6 does the negotiation.
+    connectors = []
+    for path in sorted(__import__("glob").glob("/sys/class/drm/card*-*/status")):
+        if read(path) == "connected":
+            name = os.path.basename(os.path.dirname(path))
+            edid = os.path.join(os.path.dirname(path), "edid")
+            hdr = os.path.join(os.path.dirname(path), "hdr_output_metadata")
+            connectors.append({"name": name, "edid_bytes": os.path.getsize(edid) if os.path.exists(edid) else 0,
+                              "metadata_supported": os.path.exists(hdr)})
+    out["connectors"] = connectors
+    out["hdr_capable"] = any(c["metadata_supported"] for c in connectors)
+    return out
+
+
+def cmd_which(args: argparse.Namespace) -> int:
+    doc = probe()
+    if args.json:
+        print(json.dumps(doc, indent=1, sort_keys=True))
+        return 0
+    print("session      %(type)s on %(desktop)s (compositor: %(compositor)s)" % doc)
+    print("gamescope    %(gamescope)s   seat %(seat)s vt %(vtnr)s" % doc)
+    print("pipewire     %(pipewire)s   flatpak %(flatpak)s" % doc)
+    print("focus bridge %(bridge)s" % ("on" if doc["bridge"] else "off (`hedron-session bridge on`)"))
+    for c in doc.get("connectors", []):
+        print("output       %-18s connected, edid %d bytes%s" % (
+            c["name"], c["edid_bytes"], ", HDR metadata supported" if c["metadata_supported"] else ""))
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    kind = args.kind
+    if kind in ("deck", "gamescope"):
+        if not shutil.which("gamescope"):
+            print("hedron-session: gamescope is not installed (pacman -S gamescope). The handheld\n"
+                  "profile installs it; on a desktop you probably want `hedron-session start plasma`.",
+                  file=sys.stderr)
+            return 1
+        cmd = ["gamescope", "-f", "-F", "pixel", "--prefer-output", args.output or ""]
+        cmd = [c for c in cmd if c]
+        if args.width:
+            cmd += ["-W", str(args.width), "-H", str(args.height), "-r", str(args.rate or "60")]
+        if args.hdr:
+            cmd += ["-h"]
+        cmd += ["--", "dbus-launch--wakedelay=1000"]
+        # We do NOT fabricate a nested session command: the deck launcher owns the inner
+        # compositor, and that lives in hedronos-handheld (`hedron-deck-session`).
+        cmd = ["gamescope", "-f", "-h"] if args.hdr else ["gamescope", "-f"]
+        if args.width:
+            cmd += ["-W", str(args.width), "-H", str(args.height)]
+        print("$ " + " ".join(cmd))
+        if args.dry_run:
+            return 0
+        os.execvp(cmd[0], cmd)
+    if kind in ("plasma", "kde", "gnome"):
+        target = {"plasma": "plasma-workspace", "kde": "startplasma-wayland", "gnome": "gnome-session"}[kind]
+        session_file = {"plasma": "/usr/bin/startplasma-wayland", "kde": "/usr/bin/startplasma-wayland",
+                        "gnome": "/usr/bin/gnome-session"}[kind]
+        if not os.path.exists(session_file):
+            print("hedron-session: %s is not installed" % session_file, file=sys.stderr)
+            return 1
+        cmd = [session_file]
+        if kind == "gnome":
+            cmd = [session_file, "--wayland"]
+        print("$ " + " ".join(cmd))
+        if args.dry_run:
+            return 0
+        os.execvp(cmd[0], cmd)
+    print("hedron-session: unknown session kind %r (deck|gamescope|plasma|kde|gnome)" % kind, file=sys.stderr)
+    return 2
+
+
+def cmd_bridge(args: argparse.Namespace) -> int:
+    if args.action == "on":
+        os.makedirs(os.path.dirname(BRIDGE_ON), exist_ok=True)
+        with open(BRIDGE_ON, "w", encoding="utf-8") as fh:
+            fh.write("1\n")
+        write_env(True)
+        print("focus bridge enabled. Restart the session (or `systemctl --user restart\n"
+              "hedron-flowstate-bridge.service`) for the compositor hook to load.")
+        return 0
+    if args.action == "off":
+        try:
+            os.unlink(BRIDGE_ON)
+        except OSError:
+            pass
+        write_env(False)
+        print("focus bridge disabled; FlowState will still react to hgm claims and power state")
+        return 0
+    print("usage: hedron-session bridge on|off")
+    return 2
+
+
+def write_env(enabled: bool) -> None:
+    os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
+    if enabled:
+        with open(ENV_FILE, "w", encoding="utf-8") as fh:
+            fh.write("HEDRON_SESSION_BRIDGE=1\nKWIN_SCRIPTS=hedron-vitals,hedron-focus-bridge\n")
+    elif os.path.exists(ENV_FILE):
+        os.unlink(ENV_FILE)
+
+
+def cmd_hdr(args: argparse.Namespace) -> int:
+    doc = probe()
+    if args.action == "status":
+        print("HDR capable outputs: %s" % (", ".join(c["name"] for c in doc.get("connectors", [])
+                                                if c["metadata_supported"]) or "none"))
+        print("compositor: %s (HDR needs KWin ≥ 6.2 or gamescope ≥ 3.13)" % doc["compositor"])
+        return 0
+    if not doc["hdr_capable"]:
+        print("hedron-session: no connected output advertises HDR metadata support — refusing.",
+              file=sys.stderr)
+        print("  (this is the correct answer: enabling the pipeline with an SDR panel makes\n"
+              "   colours wrong, which is worse than not having HDR)", file=sys.stderr)
+        return 1
+    if args.action == "on":
+        print("HDR requested for %s." % ", ".join(c["name"] for c in doc["connectors"] if c["metadata_supported"]))
+        print("We do not write KWin's config behind your back — System Settings → Display → HDR,\n"
+              "or on gamescope add `-h` (hedron-session start deck --hdr). The kernel side\n"
+              "(drm atomic HDR metadata + BT.2020 planes) is enabled in linux-hedron already.")
+        return 0
+    print("HDR off (nothing to undo if you never turned it on)")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    doc = probe()
+    problems = []
+    if doc["type"] == "unknown":
+        problems.append("XDG_SESSION_TYPE is unset: you are probably in an ssh/tty session, "
+                        "which is fine but means HUD and overlay settings cannot apply here")
+    if not doc["runtime"] or not os.path.isdir(doc["runtime"]):
+        problems.append("XDG_RUNTIME_DIR (%r) is missing: systemd --user is not running, so "
+                        "per-user services (hgm, vitalsd, replayd) will not start" % doc["runtime"])
+    if doc["compositor"] == "unknown":
+        problems.append("no known compositor: hedron-vitals overlay and the focus bridge stay idle")
+    if doc["type"] == "x11" and doc["compositor"] == "kwin":
+        problems.append("X11 session: replay capture uses ffmpeg x11grab (works) but the KWin "
+                        "overlay is disabled — switch to Wayland for both")
+    if not doc["pipewire"] and doc["type"] == "wayland":
+        problems.append("no PipeWire socket: screen capture and per-app audio will not work")
+    if not problems:
+        print("session looks healthy: %s on %s" % (doc["compositor"], doc["type"]))
+        return 0
+    for p in problems:
+        print("• " + p)
+    return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-session", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("which").set_defaults(func=cmd_which)
+    p = sub.add_parser("start")
+    p.add_argument("kind")
+    p.add_argument("--width", type=int, default=None)
+    p.add_argument("--height", type=int, default=None)
+    p.add_argument("--rate", default=None)
+    p.add_argument("--output", default=None)
+    p.add_argument("--hdr", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_start)
+    p = sub.add_parser("bridge")
+    p.add_argument("action", choices=["on", "off", "status"])
+    p.set_defaults(func=cmd_bridge)
+    p = sub.add_parser("hdr")
+    p.add_argument("action", choices=["on", "off", "status"])
+    p.set_defaults(func=cmd_hdr)
+    sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    args = ap.parse_args(argv)
+    if args.cmd is None:
+        return cmd_which(args)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

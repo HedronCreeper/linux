@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=HedronOS Store
+GenericName=App Store
+Comment=Install games and apps from one place — pacman, Flatpak, AUR and AppImage
+Exec=hstore gui
+Terminal=false
+Icon=system-software-install
+Categories=GTK;Qt;System;Settings;
+Keywords=store;apps;games;install;flatpak;flathub;steam;aur;
+StartupNotify=true
+X-KDE-NotificationsAppName=hedron-store

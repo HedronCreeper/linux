@@ -1,0 +1,36 @@
+# hedronos-doctor — self-check, repair plan and bug-report bundle. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-doctor"
+version = "1.0.0"
+release = "1"
+summary = "HedronOS health checks: driver/initramfs/unit/store verification, ordered fixes, redacted bug reports, bench"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["any"]
+groups = ["hedronos"]
+
+[depends]
+runtime = ["bash", "python", "systemd", "util-linux"]
+build = []
+check = ["python"]
+optional = ["pacman", "lsinitcpio", "vulkan-icd-loader", "hedronos-drivers", "hedronos-tune", "hedronos-store"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-doctor" = "0755"
+"etc/hedron/doctor.conf" = "0644"
+"usr/lib/systemd/system/hedron-doctor-scan.service" = "0644"
+"usr/lib/systemd/system/hedron-doctor-scan.timer" = "0644"
+"README.md" = "0644"
+
+[services]
+enable = ["hedron-doctor-scan.timer"]
+units = ["usr/lib/systemd/system/hedron-doctor-scan.service", "usr/lib/systemd/system/hedron-doctor-scan.timer"]
+
+[files]
+preserve = ["/etc/hedron/doctor.conf"]
+
+[tests]
+modules = ["tests/test_doctor_checks.py"]

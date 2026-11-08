@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""hedron-branding — one place the names, colours and asset paths are read from.
+
+Every front end (plymouth, SDDM, KDE colour schemes, the installer, the store, `/etc/issue`)
+wants the same four facts. Rather than four hardcoded copies that drift, they read this file.
+`css`/`kdeglobals`/`colorscheme` exist so other packages generate their config from the same
+data instead of inventing their own palette.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages",):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(9):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+
+from hedronlib.util import load_json  # noqa: E402
+
+BRANDING = os.environ.get("HEDRON_BRANDING_JSON", "/usr/share/hedron/branding/branding.json")
+
+
+def hex_to_rgba(value: str, alpha: float = 1.0) -> str:
+    value = value.lstrip("#")
+    if len(value) != 6:
+        return "0 0 0"
+    r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    if alpha >= 1.0:
+        return "%d %d %d" % (r, g, b)
+    return "%d %d %d %.2f" % (r, g, b, alpha)
+
+
+def to_kde(value: str) -> str:
+    return hex_to_rgba(value)
+
+
+def cmd_get(args: argparse.Namespace) -> int:
+    doc = load_json(args.file) or {}
+    if args.key:
+        print(doc.get(args.key, ""))
+        return 0 if args.key in doc else 1
+    print(json.dumps(doc, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_css(args: argparse.Namespace) -> int:
+    doc = load_json(args.file) or {}
+    print(":root {")
+    for key in ("accent", "accent_dim", "background", "foreground", "danger", "warn"):
+        if key in doc:
+            print("  --hedron-%s: %s;" % (key, doc[key]))
+    if "font_ui" in doc:
+        print("  --hedron-font: %s;" % doc["font_ui"])
+    print("}")
+    return 0
+
+
+def cmd_kdeglobals(args: argparse.Namespace) -> int:
+    doc = load_json(args.file) or {}
+    print("[ColorEffects:Disabled]")
+    print("Color=" + to_kde(doc.get("foreground", "#e8eef2")))
+    print("ColorAmount=0.1")
+    print("ColorEffect=0")
+    print("OpacityAmount=0.3")
+    print()
+    print("[General]")
+    print("ColorScheme=HedronOS")
+    print("Font=" + doc.get("font_ui", "Inter, 10pt"))
+    print()
+    print("[WM]")
+    print("ActiveColor1=" + to_kde(doc.get("accent", "#5ad2a0")))
+    print("ActiveColor2=" + to_kde(doc.get("accent_dim", "#2f7f63")))
+    print("InactiveColor1=" + to_kde(doc.get("background", "#0b0f14")))
+    print("InactiveColor2=" + to_kde(doc.get("background", "#0b0f14")))
+    print("ActiveBlendMode=0")
+    return 0
+
+
+def cmd_colorscheme(args: argparse.Namespace) -> int:
+    doc = load_json(args.file) or {}
+    name = args.name or "HedronOS"
+    bg = doc.get("background", "#0b0f14")
+    fg = doc.get("foreground", "#e8eef2")
+    acc = doc.get("accent", "#5ad2a0")
+    print("[General]")
+    print("ColorSchemeName=" + name)
+    print("shadeWindow=255")
+    print("dark=0.600000")
+    print("highlight=1.000000")
+    print("intensify=0.600000")
+    print("customColors=" + acc[1:].upper())
+    print()
+    print("[Background]")
+    print("Color=" + to_kde(bg))
+    print("Opacity=1.000000")
+    print()
+    for section, value in (("View", bg), ("Window", bg), ("Button", doc.get("accent_dim", "#2f7f63")),
+                           ("Selection", acc), ("Tooltip", bg)):
+        print("[%s]" % section)
+        print("Color=" + to_kde(value))
+        print("TextColor=" + to_kde(bg if section == "Selection" else fg))
+        print()
+    print("[WM]")
+    print("activeForeground=" + to_kde(fg))
+    print("inactiveForeground=" + to_kde(fg))
+    return 0
+
+
+def cmd_wallpaper(args: argparse.Namespace) -> int:
+    doc = load_json(args.file) or {}
+    walls = doc.get("wallpapers", {})
+    if args.name:
+        path = walls.get(args.name)
+        if not path:
+            print("unknown wallpaper %r (have: %s)" % (args.name, ", ".join(sorted(walls))), file=sys.stderr)
+            return 2
+        print(path)
+        return 0
+    for name, path in sorted(walls.items()):
+        print("%-10s %s" % (name, path))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-branding", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--file", default=BRANDING)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("get"); p.add_argument("key", nargs="?"); p.set_defaults(func=cmd_get)
+    sub.add_parser("css", help="CSS variables for webkit-ish surfaces").set_defaults(func=cmd_css)
+    sub.add_parser("kdeglobals", help="a KDE global-config fragment").set_defaults(func=cmd_kdeglobals)
+    p = sub.add_parser("colorscheme", help="a KDE .colors file on stdout")
+    p.add_argument("--name", default=None)
+    p.set_defaults(func=cmd_colorscheme)
+    p = sub.add_parser("wallpaper", help="list/resolve wallpapers")
+    p.add_argument("name", nargs="?")
+    p.set_defaults(func=cmd_wallpaper)
+    args = ap.parse_args(argv)
+    if not os.path.isfile(args.file):
+        print("hedron-branding: no branding file at %s" % args.file, file=sys.stderr)
+        return 1
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
