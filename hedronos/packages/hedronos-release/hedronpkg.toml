@@ -36,7 +36,6 @@ vendored = [{ from = "hedronlib", to = "usr/lib/python3.13/site-packages/hedronl
 "usr/lib/systemd/system/hedron-rollback-autosnap.timer" = "0644"
 "etc/hedron/features.json" = "0644"
 "etc/os-release" = "0644"
-"usr/share/hedron/branding/issue" = "0644"
 
 [services]
 enable = ["hedron-firstboot.service", "hedron-firstapps.timer", "hedron-rollback-autosnap.timer"]

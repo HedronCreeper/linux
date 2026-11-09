@@ -1,4 +1,12 @@
-HedronOS 1.0.0 "Halcyon" — \n (tty)
+HedronOS \r (\l)
 
   A gaming-first Linux distribution: your GPU driver was picked before this screen drew.
-  Sign in, then: hedronctl status · hedron-doctor · hstore
+  No version here on purpose — \r is the kernel, and `hedronctl status` prints the image build,
+  because a banner that repeats the release string is a banner that gets left behind by one.
+
+  Sign in, then:
+
+    hedronctl status      what the machine is doing right now
+    hedron-doctor status  why it is not doing what you asked
+    hstore list           what you can install
+

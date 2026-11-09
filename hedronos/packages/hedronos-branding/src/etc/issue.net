@@ -1,4 +1,8 @@
-HedronOS 1.0.0 "Halcyon" — \n (tty)
+HedronOS — a gaming-first Linux distribution.
 
-  A gaming-first Linux distribution: your GPU driver was picked before this screen drew.
-  Sign in, then: hedronctl status · hedron-doctor · hstore
+  Your GPU driver was picked before this banner was written, and the machine knows it:
+  run `hedronctl status` for the image build and what is tuned, `hedron-doctor status` for
+  what disagrees with that.
+
+  (No version string here, and no escapes either: sshd sends this file verbatim, so anything
+  resembling a macro is a typo waiting to be shipped to a client.)

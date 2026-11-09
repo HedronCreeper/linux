@@ -478,9 +478,11 @@ def generate(root: str) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": SCHEMA,
         "generated_from": {
-            "kernel_root": os.path.abspath(root),
             "kernel_version": kernel_version(root),
             "kernel_commit": git_rev(root),
+            # kernel_root used to be recorded here as an absolute path. It made the committed
+            # database differ on every build machine for no reader's benefit, and nothing consumed
+            # it; the tree identity is already kernel_commit.
             "generator": "hedronos/tools/gen-gpu-db.py",
             "amd": amd_meta,
             "intel": intel_meta,

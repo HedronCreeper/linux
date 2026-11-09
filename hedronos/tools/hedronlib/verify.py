@@ -629,6 +629,15 @@ def check_version_consistency(ctx: Context) -> list[Check]:
     problems: list[str] = []
     if not version:
         problems.append("VERSION file has neither a bare version line nor a VERSION= key")
+
+    # A banner that repeats the release string is a banner that ships the previous release's number.
+    # /etc/issue and /etc/issue.net may name the product, not the version: getty expands \r and sshd
+    # expands nothing at all, so the only correct version in either file is "none".
+    for banner in ("packages/hedronos-branding/src/etc/issue",
+                     "packages/hedronos-branding/src/etc/issue.net"):
+        banner_path = os.path.join(ctx.root, banner)
+        if version and os.path.isfile(banner_path) and version in "".join(_sh_lines(banner_path)):
+            problems.append("%s hardcodes VERSION=%s (use getty's \\r, or drop it)" % (banner, version))
     for name, manifest, _path in _iter_manifests_safe(ctx):
         if "__parse_error__" in manifest:
             problems.append("%s: manifest does not parse (%s)" % (name, manifest["__parse_error__"]))
@@ -878,7 +887,12 @@ def check_regeneration(ctx: Context) -> list[Check]:
         return [Check("gpu/db-reproducible", False,
                       "regenerated db differs from the committed one (%s vs %s)" % (a[:12], b[:12]),
                       "run `make gpu-db` and commit the result, or fix the generator", "error")]
-    return [Check("gpu/db-reproducible", True, "regeneration is byte-identical (modulo timestamps)", "", "info")]
+    # Say what was actually tolerated: the comparison drops `generated_from` (the provenance block,
+    # which names the kernel commit the tree was at), not a timestamp. "modulo timestamps" would let a
+    # future reader think clock skew is the only difference a rebuild can introduce, and it is not.
+    return [Check("gpu/db-reproducible", True,
+                  "regeneration is byte-identical apart from the generated_from provenance block",
+                  "", "info")]
 
 
 def check_license_headers(ctx: Context) -> list[Check]:

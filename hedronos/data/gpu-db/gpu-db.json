@@ -8420,8 +8420,7 @@
    "intel_macros": 148,
    "intel_platforms": 128
   },
-  "kernel_commit": "d48723711bae9b8cdc56719c448ba42fef28cbee",
-  "kernel_root": "/home/user/linux",
+  "kernel_commit": "6c19b1ffbbcc7594923bc469cccf23c5d4f9798a",
   "kernel_version": "7.4.0-rc1",
   "nvidia": {
    "nouveau_chipset_arithmetic_pct": 92.7,
