@@ -1,0 +1,49 @@
+# FlowState: studio — audio/latency work, not gaming.  SPDX-License-Identifier: MIT
+[profile]
+name = "studio"
+inherits = "base"
+note = "Hard real-time bias: every core in performance mode, RT throttling lifted, CPU isolation respected."
+
+[cpu]
+governor = "performance"
+energy_performance_preference = "performance"
+boost = true
+disable_idle_states = [1, 2, 3, 4]
+
+[sysctl]
+# RT throttling is the #1 cause of xruns on Linux workstations.
+"kernel.sched_rt_runtime_us" = -1
+"kernel.sched_cfs_bandwidth_slice_us" = 300000
+"vm.dirty_expire_centisecs" = 300
+"vm.stat_interval" = 1
+"net.core.busy_poll" = 50
+"net.core.busy_read" = 50
+
+[sysfs]
+"sys/kernel/mm/transparent_hugepage/enabled" = "never"
+"sys/module/workqueue/parameters/power_efficient" = "N"
+
+[gpu]
+# Do not let the GPU driver's power gating add 200 µs to a callback that must be 1 ms.
+power_profile = "high"
+
+[sched]
+scheduler = "hedron"
+[sched.cgroup]
+"session.slice/cpu.weight" = 100
+
+[limits]
+"@" = { rtprio = 99, memlock = 8388608, nofile = "1048576" }
+
+[env]
+JACK_DEFAULT_SERVER = "jackserver-studio"
+PULSE_LATENCY_MSEC = "10"
+PIPEWIRE_QUANTUM = "512/48000"
+PIPEWIRE_MIN_QUANTUM = "128/48000"
+
+[services]
+enable = ["hedron-flowstate.service"]
+disable = ["power-profiles-daemon.service"]
+
+[extra]
+threadirqs = { mode = "skip", command = "start the 'low latency' boot entry to also get threadirqs" }

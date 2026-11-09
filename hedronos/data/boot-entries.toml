@@ -1,0 +1,71 @@
+# Boot entries shared by the live image and the installed system.
+# SPDX-License-Identifier: MIT
+#
+# `hedron-boot-entries` (installed by hedronos-release) regenerates this on demand, and
+# hedronos-verify checks every referenced path exists in the rootfs layout.
+# Placeholders: {version} {codename} {profile}
+
+title_prefix = "HedronOS"
+# Seconds the boot menu waits. Long enough to hit a key on a 4-frame reaction, short
+# enough that nobody thinks the installer hung.
+timeout = 5
+
+[[entries]]
+id = "hedronos"
+title = "HedronOS {version} \"{codename}\" ({profile})"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/intel-ucode.img", "/boot/amd-ucode.img", "/boot/initramfs-linux-hedron.img"]
+options = ["rootflags=subvol=@", "rw", "quiet", "splash", "loglevel=3",
+           "rd.systemd.show_status=false", "nowatchdog", "nosoftlockup", "psi=1"]
+default = true
+
+[[entries]]
+id = "hedronos-performance"
+title = "HedronOS {version} — performance (FlowState gaming at boot)"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/intel-ucode.img", "/boot/amd-ucode.img", "/boot/initramfs-linux-hedron.img"]
+options = ["rootflags=subvol=@", "rw", "quiet", "splash", "hedron.profile=gaming",
+           "nowatchdog", "nosoftlockup", "psi=1", "tsc=reliable", "idle=nomwait"]
+
+[[entries]]
+id = "hedronos-lowlat"
+title = "HedronOS {version} — low latency (audio / capture work)"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/intel-ucode.img", "/boot/amd-ucode.img", "/boot/initramfs-linux-hedron.img"]
+options = ["rootflags=subvol=@", "rw", "quiet", "splash", "hedron.profile=studio",
+           "threadirqs", "preempt=full", "psi=1"]
+when.not_profiles = ["core"]
+
+[[entries]]
+id = "hedronos-scx"
+title = "HedronOS {version} — scx_hedron scheduler (no BPF fallback)"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/amd-ucode.img", "/boot/initramfs-linux-hedron.img"]
+options = ["rootflags=subvol=@", "rw", "quiet", "splash", "hedron.scx=hedron",
+           "kernel.sched_ext_enable_rhf=1"]
+
+[[entries]]
+id = "hedronos-fallback-graphics"
+title = "HedronOS {version} — fallback graphics (no vendor driver)"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/initramfs-linux-hedron.img"]
+options = ["rootflags=subvol=@", "rw", "hedron.nvidia=0", "hedron.amdgpu=0", "nomodeset",
+           "systemd.unit=hedron-rescue.target"]
+
+[[entries]]
+id = "hedronos-rollback"
+title = "HedronOS {version} — boot previous snapshot"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/initramfs-linux-hedron.img"]
+options = ["rootflags=subvol=@,subvolid=snapshot-latest", "ro", "systemd.show_status=1"]
+when.not_profiles = ["core"]
+
+[[entries]]
+id = "hedronos-rescue"
+title = "HedronOS {version} — rescue shell (all hedron services off)"
+linux = "/boot/vmlinuz-linux-hedron"
+initrd = ["/boot/initramfs-linux-hedron.img"]
+options = ["rw", "systemd.unit=rescue.target", "hedron.disable=1"]
+
+# NOTE: firmware setup is exposed by loader.conf (`auto-firmware-settings`), not as an
+# entry, because the EFI shell path differs per vendor and silently breaks on some.

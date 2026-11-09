@@ -1,0 +1,24 @@
+# The text-mode chooser on the live ISO's first console — this is what you see when you boot
+# the USB stick without a desktop (and on serial, where the GUI is unavailable).
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS app chooser (live session)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+ConditionPathExists=/run/hedron/live-session
+After=getty@tty1.service systemd-user-sessions.service
+
+[Service]
+Type=idle
+Environment=HEDRON_SELECTION=/var/lib/hedron/selected-apps.json
+ExecStart=/usr/bin/hedron-setup --tui
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+Nice=19
+# Deliberately not WantedBy=multi-user.target: getty owns tty1 and a service that grabs the
+# same tty races it. The live image starts it by name (see build/lib/image.sh) and the desktop
+# autostart file handles graphical sessions — the unit is here for `systemctl start` and for
+# the ISO's boot menu entry, which is the behaviour you actually want when it is needed.
+
+[Install]
+WantedBy=graphical.target

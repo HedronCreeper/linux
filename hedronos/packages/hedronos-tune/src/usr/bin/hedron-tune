@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""hedron-tune — the FlowState command line.
+
+  hedron-tune status                     what is true right now (+ which profile is active)
+  hedron-tune list                       profiles, sizes, one-line notes
+  hedron-tune show gaming [--diff]       the full desired state of a profile
+  hedron-tune apply gaming [--dry-run]   compute + apply the delta (transactional)
+  hedron-tune revert [id]                undo an applied transaction
+  hedron-tune transactions               what was applied when, by whom
+  hedron-tune lock <mins> / unlock       stop/start the daemon flipping profiles on you
+  hedron-tune game-on / game-off         manual FlowState engagement (used by launchers)
+  hedron-tune browser-optimize firefox   per-app opt-in tweaks (VA-API, smoothness flags)
+  hedron-tune gpu-clocks lock 2600 900  lock graphics/memory clocks for a benchmark run
+  hedron-tune allow-third-party-power    stop fighting TLP/auto-cpufreq if you insist
+  hedron-tune profile set studio         persistent default across reboots
+
+Everything here is *diff-based*: we never blindly write sysfs. That matters because a
+blind write to /sys/.../energy_performance_preference on a CPU that lacks it is a
+silent failure, and on a laptop with a locked firmware it can hang the thermal zone.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+
+# repo checkout (packages/*/src/usr/bin) without an install step, so try both locations.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# Path bootstrap: the same file must work installed (/usr/lib/…) and straight from a repo
+# checkout (packages/<pkg>/src/usr/…) with no install step, so walk up looking for the
+# vendored library instead of hard-coding a depth that changes with the packaging layout.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", os.path.join(_HERE, "..", "python3.13/site-packages")):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")) and _cand not in sys.path:
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+else:
+    _d = _HERE
+    for _ in range(8):
+        _d = os.path.dirname(_d)
+        if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+            sys.path.insert(0, os.path.join(_d, "tools"))
+            break
+
+from hedronlib import gpus, tune  # noqa: E402
+from hedronlib.util import human_bytes, table  # noqa: E402
+
+ROOT = os.environ.get("HEDRON_ROOT", "/")
+
+
+def _find(system_path: str, checkout_rel: str, state: bool = False) -> str:
+    """Locate a data dir in the three places it can legitimately live.
+
+    Tests and `--dry-run` set HEDRON_ROOT / HEDRON_STATE_DIR; a repo checkout has the files
+    under packages/<pkg>/src; an installed system has them in /etc and /var/lib.
+    """
+    override = os.environ.get("HEDRON_FLOWSTATE_DIR" if not state else "HEDRON_STATE_DIR")
+    if override:
+        return override
+    here = _HERE
+    for cand in (os.path.join(ROOT, system_path.lstrip("/")) if ROOT != "/" else system_path,
+                 os.path.abspath(os.path.join(here, checkout_rel))):
+        if os.path.isdir(cand) or os.path.isfile(cand):
+            return cand
+    return system_path
+
+
+PROFILE_DIR = _find("/etc/hedron/flowstate.d", os.path.join("..", "..", "etc", "hedron", "flowstate.d"))
+USER_DROP_DIR = os.path.join(PROFILE_DIR, "user")
+STATE_DIR = _find("/var/lib/hedron/flowstate", os.path.join("..", "..", "..", "..", "..", ".hedron-state", "flowstate"), state=True)
+TX_DIR = os.path.join(STATE_DIR, "transactions")
+LOCK = os.path.join(STATE_DIR, "locked")
+ACTIVE = os.path.join(STATE_DIR, "active")
+DEFAULT = os.path.join(STATE_DIR, "default")
+
+
+def root_arg(args: argparse.Namespace) -> str:
+    return getattr(args, "root", "/") or "/"
+
+
+def build(args: argparse.Namespace) -> tuple[tune.Sysfs, tune.Detect, tune.ProfileSet]:
+    root = root_arg(args)
+    sysfs = tune.Sysfs(root)
+    info = None
+    if not getattr(args, "offline", False):
+        try:
+            info = gpus.collect_system_info(sysfs_root=root if root != "/" else "/sys")
+            info.devices = gpus.devices_from_sysfs(os.path.join(root, "sys")) if root != "/" else info.devices
+        except Exception:  # noqa: BLE001 - status must work on a broken system
+            info = None
+    detect = tune.Detect.from_system(root=root, info=info, user_drop_dir=USER_DROP_DIR)
+    profiles = tune.ProfileSet(PROFILE_DIR)
+    return sysfs, detect, profiles
+
+
+def record_transaction(tx: tune.Transaction, applied: list[tune.Action], dry: bool) -> str:
+    txid = "%s-%s" % (time.strftime("%Y%m%dT%H%M%SZ"), uuid.uuid4().hex[:8])
+    payload = {"id": txid, "when": time.time(), "actor": safe_user(), "dry_run": dry,
+               "profile": tx.profile, "notes": tx.notes, "conflicts": tx.conflicts,
+               "actions": [a.as_dict() for a in tx.actions],
+               "applied": len(applied)}
+    if dry:
+        return txid
+    os.makedirs(TX_DIR, exist_ok=True)
+    with open(os.path.join(TX_DIR, txid + ".json"), "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=1, sort_keys=True)
+    return txid
+
+
+def safe_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 - uid 0 in a chroot has no passwd entry sometimes
+        return "uid-%d" % os.getuid()
+
+
+
+SCHED_UNIT = "hedron-scheduler.service"
+SCHED_BIN = "/usr/lib/hedron/scx/scx_hedron"
+SCHED_SYSFS = "/sys/kernel/sched_ext/root/ops"
+
+
+def cmd_scheduler(args) -> int:
+    """Report or change which sched_ext scheduler is active.
+
+    The kernel, not us, decides whether a BPF scheduler is live: /sys/kernel/sched_ext/root/ops names
+    it (empty for EEVDF). Everything here reads that file and says what it found, because a tool that
+    reported what it *asked for* rather than what the kernel accepted would be a lie waiting to happen
+    after a failed switch.
+    """
+    active = ""
+    try:
+        with open(SCHED_SYSFS, encoding="utf-8") as fh:
+            active = fh.read().strip()
+    except OSError:
+        pass
+
+    if args.action in ("status", None):
+        if not os.path.exists("/sys/kernel/sched_ext"):
+            print("sched_ext: the kernel exposes no /sys/kernel/sched_ext — CONFIG_SCHED_CLASS_EXT is off")
+            return 1
+        print("sched_ext active:  %s" % (active or "no (the default EEVDF class is running)"))
+        print("userspace binary:  %s" % (SCHED_BIN if os.path.isfile(SCHED_BIN) else "%s (not installed)" % SCHED_BIN))
+        if active and active != "hedron":
+            print("note: another scheduler (%s) owns the class; `off` then `on` hands it back" % active)
+        return 0
+
+    if not os.path.isfile(SCHED_BIN):
+        print("hedron-tune: %s is not installed, so there is no scheduler to %s"
+              % (SCHED_BIN, args.action), file=sys.stderr)
+        print("  it ships in linux-hedron (built from tools/sched_ext in the same tree)", file=sys.stderr)
+        return 1
+
+    verb = "start" if args.action == "on" else "stop"
+    cmd = ["systemctl", verb, SCHED_UNIT]
+    if args.dry_run:
+        print("dry-run: %s" % " ".join(cmd))
+        return 0
+    try:
+        proc = subprocess.run(cmd, check=False)
+    except OSError as exc:                      # no systemd (a chroot, a container, a live ISO)
+        print("hedron-tune: cannot talk to systemd (%s)" % exc, file=sys.stderr)
+        print("  start it by hand: %s" % SCHED_BIN, file=sys.stderr)
+        return 1
+    if proc.returncode:
+        print("hedron-tune: `systemctl %s %s` exited %d — the kernel may have refused the switch"
+              % (verb, SCHED_UNIT, proc.returncode), file=sys.stderr)
+        print("  journalctl -u %s -n 20" % SCHED_UNIT, file=sys.stderr)
+    return proc.returncode
+
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    _sysfs, _detect, profiles = build(args)
+    rows = []
+    for name in profiles.names():
+        spec = profiles.profiles[name]
+        note = str((spec.get("profile", {}) or {}).get("note", "")).replace("\n", " ")
+        inherited = (spec.get("profile", {}) or {}).get("inherits", "")
+        kind = "profile"
+        rows.append([name, kind, inherited or "-", "%d sections" % len([k for k in spec if k != "profile"]), note[:70]])
+    for name in profiles.overlays:
+        rows.append([name, "overlay", "-", "-", "hardware overlay applied automatically"])
+    print(table(rows, headers=["name", "kind", "inherits", "size", "note"]))
+    if args.json:
+        print(json.dumps({"profiles": profiles.names(), "overlays": sorted(profiles.overlays)}, indent=1))
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    sysfs, detect, profiles = build(args)
+    tx = profiles.render(args.profile, sysfs=sysfs, detect=detect, include_unchanged=True)
+    actions = tx.actions
+    if args.diff:
+        actions = [a for a in tx.actions if a.mode != "skip"]
+    if args.json:
+        print(json.dumps(tx.as_dict(), indent=1, sort_keys=True))
+        return 0
+    print("profile %s%s" % (tx.profile, " (diff only)" if args.diff else ""))
+    for section in tune.KINDS:
+        subset = [a for a in actions if a.kind == section]
+        if not subset:
+            continue
+        print("\n  [%s]" % section)
+        for action in subset:
+            print("    " + action.describe())
+    for note in tx.notes:
+        print("\n  note: " + note)
+    for conflict in tx.conflicts:
+        print("\n  CONFLICT: " + conflict)
+    print("\n  %d of %d settings would change" % (len([a for a in tx.actions if a.mode != "skip"]), len(tx.actions)))
+    return 0
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    sysfs, detect, profiles = build(args)
+    tx = profiles.render(args.profile, sysfs=sysfs, detect=detect, include_unchanged=True)
+    changes = [a for a in tx.actions if a.mode != "skip"]
+    if not changes and not args.force:
+        print("profile %s: nothing to change — already in this state" % args.profile)
+        write_active(args.profile)
+        return 0
+    print("applying profile %s (%d change%s)" % (args.profile, len(changes), "" if len(changes) == 1 else "s"))
+    applied = []
+    failed = 0
+    for action in changes:
+        if action.mode == "write":
+            ok, why = sysfs.write(action.path, action.value)
+            if ok:
+                applied.append(action)
+                if not args.quiet:
+                    print("  ✓ %s = %s" % (action.path, action.value))
+            elif action.kind == "sysctl":
+                ok2, why2 = write_procctl(action.path.split("/")[-1], action.value, root_arg(args))
+                if ok2:
+                    applied.append(action)
+                    if not args.quiet:
+                        print("  ✓ sysctl %s = %s" % (action.path, action.value))
+                else:
+                    failed += 1
+                    print("  ✗ %s: %s" % (action.path, why2 or why))
+            else:
+                failed += 1
+                print("  ✗ %s: %s" % (action.path, why))
+        elif action.mode == "command":
+            verb, _, unit = action.path.partition(":")
+            proc = subprocess.run(["systemctl", verb, unit], capture_output=True, text=True)
+            if proc.returncode == 0:
+                applied.append(action)
+            else:
+                failed += 1
+                print("  ✗ systemctl %s %s: %s" % (verb, unit, proc.stderr.strip()[:120]))
+        elif action.mode == "skip":
+            continue
+    write_active(args.profile)
+    if args.rollback_snapshot or os.environ.get("HEDRON_ROLLBACK") == "1":
+        subprocess.run(["hedron-rollback", "snapshot", "flowstate:" + args.profile],
+                       capture_output=True, text=True)
+    txid = record_transaction(tx, applied, dry=False)
+    if args.reason:
+        annotate(txid, args.reason)
+    print("\napplied %d, failed %d (transaction %s)" % (len(applied), failed, txid))
+    if failed:
+        print("some knobs are unavailable on this hardware; `hedron-tune show %s` marks them as skip" % args.profile)
+    if args.notify_session:
+        notify_session(args.profile)
+    return 0 if failed == 0 else 1
+
+
+def cmd_dry(args: argparse.Namespace) -> int:
+    sysfs, detect, profiles = build(args)
+    tx = profiles.render(args.profile, sysfs=sysfs, detect=detect)
+    changes = [a for a in tx.actions if a.mode != "skip"]
+    for action in changes:
+        print("  would " + action.describe())
+    print("\n%d change(s), no writes performed" % len(changes))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    sysfs, detect, profiles = build(args)
+    st = tune.status(sysfs, detect)
+    active = tune.active_profile(sysfs) or "-"
+    gov = {v["governor"] for v in st["cpus"].values() if v.get("governor")}
+    freqs = [int(v["freq_khz"]) for v in st["cpus"].values() if v.get("freq_khz") and v["freq_khz"].isdigit()]
+    lines = []
+    lines.append("profile      : %s" % active)
+    lines.append("hardware     : %s GPU, %d CPUs%s" % (detect.vendor, len(detect.cpu_ids()),
+                                                       " (handheld)" if detect.handheld else
+                                                       " (laptop)" if detect.laptop else ""))
+    if gov:
+        lines.append("cpu governor : %s" % ", ".join(sorted(gov)))
+    if freqs:
+        lines.append("cpu clocks   : %.2f–%.2f GHz" % (min(freqs) / 1e6, max(freqs) / 1e6))
+    if st["gpu"]:
+        for knob, entry in sorted(st["gpu"].items()):
+            lines.append("gpu %-9s: %s" % (knob, entry["value"].strip().replace("\n", " ")[:80]))
+    for key in sorted(st["sysctl"]):
+        lines.append("  %-46s %s" % (key, st["sysctl"][key]))
+    if os.path.exists(LOCK):
+        until = open(LOCK, encoding="utf-8").read().strip()
+        lines.append("lock         : ACTIVE until %s" % until)
+    for note in st["notes"]:
+        lines.append("note         : " + note)
+    daemon = subprocess.run(["systemctl", "is-active", "--quiet", "hedron-flowstate.service"],
+                            capture_output=True, text=True).returncode
+    lines.append("flowstate d  : %s" % ("running" if daemon == 0 else "not running"))
+    if args.json:
+        payload = {"active": active, "status": st, "vendor": detect.vendor,
+                   "handheld": detect.handheld, "laptop": detect.laptop,
+                   "locked": os.path.exists(LOCK), "daemon": "running" if daemon == 0 else "stopped"}
+        print(json.dumps(payload, indent=1, sort_keys=True))
+        return 0
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_transactions(args: argparse.Namespace) -> int:
+    if not os.path.isdir(TX_DIR):
+        print("no transactions recorded yet")
+        return 0
+    rows = []
+    for name in sorted(os.listdir(TX_DIR), reverse=True)[: args.limit]:
+        try:
+            data = json.load(open(os.path.join(TX_DIR, name), encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        rows.append([data["id"], time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(data["when"])),
+                     data["profile"], str(data["applied"]), data["actor"], data.get("reason", "")])
+    print(table(rows, headers=["id", "when", "profile", "changes", "by", "reason"]))
+    return 0
+
+
+def cmd_revert(args: argparse.Namespace) -> int:
+    txid = args.id
+    if not txid:
+        names = sorted(os.listdir(TX_DIR)) if os.path.isdir(TX_DIR) else []
+        if not names:
+            print("nothing to revert")
+            return 1
+        txid = names[-1]
+    path = os.path.join(TX_DIR, txid if txid.endswith(".json") else txid + ".json")
+    if not os.path.isfile(path):
+        print("no such transaction: %s" % path, file=sys.stderr)
+        return 2
+    data = json.load(open(path, encoding="utf-8"))
+    sysfs = tune.Sysfs(root_arg(args))
+    restored = 0
+    skipped = 0
+    for action in reversed(data["actions"]):
+        if action["mode"] != "write" or not action.get("rollback"):
+            skipped += 1
+            continue
+        ok, why = sysfs.write(action["path"], action["rollback"])
+        if ok:
+            restored += 1
+            if not args.quiet:
+                print("  ↺ %s = %s" % (action["path"], action["rollback"]))
+        else:
+            skipped += 1
+            print("  ! could not restore %s: %s" % (action["path"], why))
+    print("reverted %d setting(s), %d skipped" % (restored, skipped))
+    default = ""
+    if os.path.isfile(DEFAULT):
+        default = open(DEFAULT, encoding="utf-8").read().strip()
+    if default:
+        print("note: your persistent default profile is %r — `hedron-tune profile set` changes it" % default)
+    return 0
+
+
+def cmd_lock(args: argparse.Namespace) -> int:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if args.unlock:
+        try:
+            os.unlink(LOCK)
+        except OSError:
+            pass
+        print("FlowState auto-switching re-enabled")
+        return 0
+    until = time.time() + args.mins * 60
+    with open(LOCK, "w", encoding="utf-8") as fh:
+        fh.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until)) + "\n")
+    print("FlowState will not change your profile for %d minutes" % args.mins)
+    return 0
+
+
+def cmd_engage(args: argparse.Namespace) -> int:
+    verb = "gamemode-enter" if args.mode == "on" else "gamemode-leave"
+    payload = "%s %s %s" % (verb, str(os.getppid()), args.note or "")
+    try:
+        sock = socket_connection()
+        if sock is None:
+            raise OSError("daemon not listening")
+        sock.sendall((payload + "\n").encode())
+        reply = sock.recv(4096).decode()
+        print(reply.strip() or "ok")
+        return 0
+    except OSError as exc:
+        print("hedron-tune: could not reach hedronflowd (%s); applying the profile directly" % exc)
+        return cmd_apply(argparse.Namespace(profile="gaming" if args.mode == "on" else "balanced",
+                                           root="/", diff=False, json=False, quiet=True, force=False,
+                                           reason="game-%s" % args.mode, notify_session=False,
+                                           rollback_snapshot=False, offline=True))
+
+
+def socket_connection():
+    import socket as _socket
+    if not os.path.exists(tune_state_socket()):
+        return None
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    sock.settimeout(10)
+    sock.connect(tune_state_socket())
+    return sock
+
+
+def tune_state_socket() -> str:
+    return "/run/hedron/flowstate.sock"
+
+
+def write_active(profile: str) -> None:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(ACTIVE, "w", encoding="utf-8") as fh:
+            fh.write(profile + "\n")
+    except OSError:
+        pass
+
+
+def annotate(txid: str, reason: str) -> None:
+    path = os.path.join(TX_DIR, txid + ".json")
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+        data["reason"] = reason
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1, sort_keys=True)
+    except (OSError, ValueError):
+        pass
+
+
+def notify_session(profile: str) -> None:
+    subprocess.run(["sh", "-c", "hedron-notify 'FlowState: %s' 2>/dev/null || true" % profile],
+                   capture_output=True, text=True)
+
+
+def write_procctl(key: str, value: str, root: str) -> tuple[bool, str]:
+    path = os.path.join(root, "proc/sys", key.replace(".", "/"))
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(value + "\n")
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    if args.action == "set":
+        profiles = tune.ProfileSet(PROFILE_DIR)
+        if args.name not in profiles.profiles:
+            print("unknown profile %r — `hedron-tune list` shows what exists" % args.name, file=sys.stderr)
+            return 2
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(DEFAULT, "w", encoding="utf-8") as fh:
+            fh.write(args.name + "\n")
+        subprocess.run(["systemctl", "restart", "hedron-flowstate.service"], capture_output=True, text=True)
+        print("default profile set to %s (applied on next session start; %s now)"
+              % (args.name, "restarted the daemon" if os.path.isdir("/run/systemd/system") else "no systemd"))
+        return 0
+    if args.action == "show":
+        print(open(DEFAULT, encoding="utf-8").read().strip() if os.path.isfile(DEFAULT) else "(none: gaming default from the ISO)")
+        return 0
+    print("usage: hedron-tune profile set|show [name]", file=sys.stderr)
+    return 2
+
+
+def cmd_gpu_clocks(args: argparse.Namespace) -> int:
+    sysfs, detect, _profiles = build(args)
+    paths = detect.gpu_paths("gpu_clock_lock")
+    if not paths:
+        print("no GPU clock interface exposed (needs amdgpu pp_dpm_sclk, or nvidia-settings --assign)",
+              file=sys.stderr)
+        if args.undo:
+            return 0
+        return 1
+    value = "0" if args.undo else (str(args.graphics) if args.graphics else "auto")
+    wrote = 0
+    for path in paths:
+        current = sysfs.read(path)
+        if current is None:
+            continue
+        ok, why = sysfs.write(path, value)
+        if ok:
+            wrote += 1
+            print("  %s ← %s (was %s)" % (path, value, current.splitlines()[-1] if current else "-"))
+        else:
+            print("  ! %s: %s" % (path, why))
+    if not wrote:
+        print("nothing writable; on NVIDIA use `nvidia-settings -a [gpu:0]/GPUClockBoost=1`", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_browser_optimize(args: argparse.Namespace) -> int:
+    """One-shot, honest per-app opt-ins. We do NOT silently patch browser flags."""
+    browser = args.browser
+    notes = {
+        "firefox": ["set media.ffmpeg.vaapi.enabled = true (about:config)",
+                    "set gfx.webrender.all = true and layers.acceleration.force-enabled = true",
+                    "keep media.hardware-video-decoding.enabled = true; HedronOS ships the VA-API drivers"],
+        "chromium": ["launch with --enable-features=VaapiVideoDecoder,VaapiVideoEncoder",
+                     "and --ozone-platform=wayland for fractional-scale-correct tearing-free output",
+                     "flags file: ~/.config/chromium-flags.conf (HedronOS writes this on request only)"],
+        "brave": ["brave://flags → Hardware Acceleration on; use --enable-features=VaapiVideoDecoder"],
+    }.get(browser, ["no specific advice on file; check vainfo and vulkaninfo --summary first"])
+    print("HedronOS already installed the drivers for %s. What is left is *your* choice:" % browser)
+    for line in notes:
+        print("  • " + line)
+    if args.apply:
+        flags = os.path.expanduser("~/.config/%s-flags.conf" % browser)
+        os.makedirs(os.path.dirname(flags), exist_ok=True)
+        with open(flags, "a", encoding="utf-8") as fh:
+            fh.write("--ozone-platform-hint=auto\n--enable-features=VaapiVideoDecoder,VaapiVideoEncoder\n")
+        print("wrote %s" % flags)
+    return 0
+
+
+def cmd_allow_third_party(args: argparse.Namespace) -> int:
+    conf = "/etc/hedron/flowstate.conf"
+    os.makedirs(os.path.dirname(conf), exist_ok=True)
+    with open(conf, "a", encoding="utf-8") as fh:
+        fh.write("\n# you asked for this with `hedron-tune allow-third-party-power`\n")
+        fh.write("auto_power = false\n")
+    print("FlowState will leave power management alone. The third-party daemon you installed")
+    print("now owns governors — that is a supported-but-untuned configuration. Revert by")
+    print("deleting the auto_power line from %s." % conf)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-tune", description=__doc__.splitlines()[1].strip(),
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", default="/", help="operate on an alternate root (installer/chroot)")
+    ap.add_argument("--offline", action="store_true", help="do not probe hardware")
+    ap.add_argument("--json", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list").set_defaults(func=cmd_list)
+    p = sub.add_parser("scheduler", help="status | on | off — the sched_ext scheduler (scx_hedron)")
+    p.add_argument("action", nargs="?", choices=["status", "on", "off"], default="status")
+    p.add_argument("--dry-run", action="store_true", help="print the systemctl command, do not run it")
+    p.set_defaults(func=cmd_scheduler)
+    p = sub.add_parser("status")
+    p.set_defaults(func=cmd_status)
+    p = sub.add_parser("show")
+    p.add_argument("profile")
+    p.add_argument("--diff", action="store_true")
+    p.set_defaults(func=cmd_show)
+    p = sub.add_parser("apply")
+    p.add_argument("profile")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true", help="re-apply even unchanged knobs")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--reason", default=None)
+    p.add_argument("--notify-session", action="store_true")
+    p.add_argument("--rollback-snapshot", action="store_true")
+    p.set_defaults(func=cmd_apply)
+    p = sub.add_parser("dry-run")
+    p.add_argument("profile")
+    p.set_defaults(func=cmd_dry)
+    p = sub.add_parser("transactions")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_transactions)
+    p = sub.add_parser("revert")
+    p.add_argument("id", nargs="?", default=None)
+    p.add_argument("--quiet", action="store_true")
+    p.set_defaults(func=cmd_revert)
+    p = sub.add_parser("lock")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("mins", nargs="?", type=int, default=60)
+    g.add_argument("--unlock", action="store_true")
+    p.set_defaults(func=cmd_lock)
+    p = sub.add_parser("profile")
+    p.add_argument("action", choices=["set", "show"])
+    p.add_argument("name", nargs="?", default="")
+    p.set_defaults(func=cmd_profile)
+    p = sub.add_parser("game-on")
+    p.add_argument("--note", default="")
+    p.set_defaults(func=lambda a: cmd_engage(argparse.Namespace(mode="on", note=a.note)))
+    p = sub.add_parser("game-off")
+    p.set_defaults(func=lambda a: cmd_engage(argparse.Namespace(mode="off", note="")))
+    p = sub.add_parser("browser-optimize")
+    p.add_argument("browser")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_browser_optimize)
+    p = sub.add_parser("gpu-clocks")
+    p.add_argument("graphics", nargs="?", type=int, default=None)
+    p.add_argument("memory", nargs="?", type=int, default=None)
+    p.add_argument("--undo", action="store_true")
+    p.set_defaults(func=cmd_gpu_clocks)
+    p = sub.add_parser("allow-third-party-power")
+    p.set_defaults(func=cmd_allow_third_party)
+
+    args = ap.parse_args(argv)
+    if getattr(args, "dry_run", False) and args.cmd == "apply":
+        return cmd_dry(argparse.Namespace(profile=args.profile, root=args.root, offline=args.offline))
+    try:
+        return args.func(args)
+    except tune.ProfileError as exc:
+        print("hedron-tune: %s" % exc, file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

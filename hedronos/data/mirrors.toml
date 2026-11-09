@@ -1,0 +1,59 @@
+# Mirror policy for HedronOS installs and updates.
+# SPDX-License-Identifier: MIT
+#
+# The installer picks the fastest set by latency *and* by "does it carry our repo",
+# then writes /etc/pacman.d/mirrorlist. `hedron_repo` entries are where the hedronos-*
+# packages live once the user goes online.
+
+[policy]
+strategy = "latency+coverage"
+max_servers = 12
+check_interval_hours = 12
+ipv6_first = false
+# Never silently fall back to a mirror that lacks the hedron repo: the driver
+# packages and the store index must come from the same signed source.
+require_hedron_repo = true
+
+[[mirror]]
+name = "world"
+url = "https://geo.mirror.pkgbuild.com/$repo/os/$arch"
+hedron_repo = "https://mirror.hedronos.org/$release/$repo/$arch"
+score = 100
+regions = ["*"]
+
+[[mirror]]
+name = "eu-northern"
+url = "https://eu.mirror.pkgbuild.com/$repo/os/$arch"
+hedron_repo = "https://eu.mirror.hedronos.org/$release/$repo/$arch"
+score = 95
+regions = ["EU", "NO", "DE", "FR", "ES", "PT", "IT"]
+
+[[mirror]]
+name = "na-east"
+url = "https://ga.mirror.pkgbuild.com/$repo/os/$arch"
+hedron_repo = "https://us-east.mirror.hedronos.org/$release/$repo/$arch"
+score = 92
+regions = ["US", "CA", "MX"]
+
+[[mirror]]
+name = "asia-southeast"
+url = "https://sg.mirror.pkgbuild.com/$repo/os/$arch"
+hedron_repo = "https://sg.mirror.hedronos.org/$release/$repo/$arch"
+score = 88
+regions = ["SG", "MY", "ID", "TH", "VN", "PH"]
+
+[[mirror]]
+name = "oceania"
+url = "https://au.mirror.pkgbuild.com/$repo/os/$arch"
+hedron_repo = "https://au.mirror.hedronos.org/$release/$repo/$arch"
+score = 80
+regions = ["AU", "NZ"]
+
+[[mirror]]
+name = "source-selfhost"
+note = "A user who builds their own ISO uses the on-disk repo; the installer detects it."
+url = "file:///var/cache/hedron/drivers"
+hedron_repo = "file:///etc/hedron/repo"
+score = 10
+regions = ["*"]
+local = true

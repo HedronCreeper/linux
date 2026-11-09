@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS rollback: pre-update snapshot
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+# Triggered by the pacman hook (and by the ISO installer before it touches the target).
+ConditionPathExists=/var/lib/hedron/rollback/enable
+
+[Service]
+Type=oneshot
+# The reason string is what shows up in `hedron-rollback list`, so make it searchable.
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedron-rollback.py snapshot --reason %i --boot-entry

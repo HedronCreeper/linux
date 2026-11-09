@@ -1,0 +1,378 @@
+# HedronOS driver rules — the knowledge base of the GPU decision engine.
+# SPDX-License-Identifier: MIT
+#
+# `hedronlib.drivers.DriverEngine` evaluates this file against the PCI ids it found.
+# Nothing here is executed: each branch produces a *plan* (packages, kernel params,
+# modprobe files, initcpio modules, services, checks) that the installer applies.
+#
+# Conventions
+#   priority          higher wins among matching branches (+5 if the device is in the
+#                     generated PCI db, +20 if the branch is the open module and the GPU
+#                     supports it, -15 for legacy branches — see prio_bonus())
+#   requires.*        hard predicates, all must hold (fail-closed: an unknown predicate
+#                     makes the branch not match, it never silently passes)
+#   generation_*      monotonic "how new is this GPU" scale, see hedronlib.gpus
+#   checks            what `hedron-drivers verify` must prove after applying
+
+format = "hedronos-driver-rules/1"
+version = 6
+
+# Installed for every GPU, whatever the vendor. 32-bit libs are not decoration:
+# Proton/Wine games load the 32-bit GL/Vulkan ICDs.
+common_packages = [
+  { name = "mesa", reason = "OpenGL + Vulkan (RADV/ANV/new-si)", tier = "required" },
+  { name = "lib32-mesa", reason = "32-bit GL/Vulkan for Proton and Wine prefix games", tier = "required" },
+  { name = "vulkan-icd-loader", reason = "Vulkan loader", tier = "required" },
+  { name = "lib32-vulkan-icd-loader", reason = "32-bit Vulkan loader", tier = "required" },
+  { name = "vulkan-tools", reason = "vulkaninfo device/extension report", tier = "required" },
+  { name = "mesa-utils", reason = "glxinfo/glxgears for hedron-doctor", tier = "recommended" },
+  { name = "libva-utils", reason = "vainfo: is hardware video decode actually wired up?", tier = "recommended" },
+  { name = "gpu-screen-recorder", reason = "Instant Replay backend (NVENC/AMF/VAAPI)", tier = "recommended", source = "aur" },
+  { name = "hedronos-drivers", reason = "HedronOS driver engine (in the ISO repo)", tier = "required", source = "hedron" },
+]
+
+# --------------------------------------------------------------------- general
+[general]
+initcpio_hooks = ["hedronos-drivers"]
+services_enable = ["hedronos-drivers.service"]
+fallback_packages = [
+  { name = "mesa", reason = "llvmpipe/lavapipe fallback so a failed GPU never means a black screen", tier = "required" },
+  { name = "xf86-video-vesa", reason = "last-resort X driver", tier = "optional" },
+]
+
+# Kernel parameters that depend on the *machine*, not the card.
+[[general.cmdline_rules]]
+id = "idle-latency"
+when.always = true
+add = ["nowatchdog", "nosoftlockup"]
+
+[[general.cmdline_rules]]
+id = "psi-for-hud"
+when.vendors = ["nvidia", "amd", "intel"]
+add = ["psi=1"]
+
+[[general.cmdline_rules]]
+id = "hybrid-iommu"
+when.hybrid = true
+add = ["iommu=pt"]
+
+[[general.cmdline_rules]]
+id = "handheld-aspm"
+when.handheld = true
+add = ["pcie_aspm=off", "tsc=reliable"]
+
+[[general.cmdline_rules]]
+id = "laptop-nvidia-s3"
+when.laptop = true
+when.vendors = ["nvidia"]
+add = ["nvidia.NVreg_DynamicPowerManagement=0x05"]
+
+[[general.cmdline_rules]]
+id = "low-ram"
+when.ram_max_mib = 8192
+add = ["zswap.compressor=zstd", "zswap.enabled=1"]
+
+# Plan-wide tweaks keyed off the machine shape.
+[[general.plan_rules]]
+id = "proton-32bit"
+when.vendors = ["nvidia", "amd", "intel"]
+add_packages = ["lib32-glibc", "lib32-zlib"]
+
+[[general.plan_rules]]
+id = "handheld-power"
+when.handheld = true
+add_packages = ["hedronos-handheld"]
+add_env = ["HEDRON_HANDHELD=1"]
+enable = ["hedron-handheld.service"]
+
+[[general.plan_rules]]
+id = "disable-nouveau-on-nvidia"
+when.vendors = ["nvidia"]
+mask = ["nouveau.service"]
+add_cmdline = ["module_blacklist=nouveau"]
+
+[[general.plan_rules]]
+id = "recording-stack"
+when.vendors = ["amd", "nvidia", "intel"]
+add_packages = ["gpu-screen-recorder", "sof-firmware"]
+
+# ----------------------------------------------------------------------- NVIDIA
+[vendors.nvidia]
+pci_vendor = "0x10de"
+class_match = ["0x0300", "0x0302", "0x0403"]
+dkms = true
+headers_package = "linux-hedron-headers"
+
+# Turing (TU10x/TU11x) and newer → the *open* kernel module: GSP firmware, better
+# power management, and it is the only branch NVIDIA still develops.
+[[vendors.nvidia.branches]]
+name = "open"
+title = "NVIDIA open kernel modules (GSP)"
+priority = 100
+kmod = "nvidia"
+confidence = 0.95
+requires.generation_min = 19
+requires.open_kernel_module = true
+packages = [
+  { name = "nvidia-open-dkms", reason = "kernel module, built against linux-hedron headers at install", tier = "required" },
+  { name = "linux-hedron-headers", reason = "DKMS needs headers for *our* kernel", tier = "required", source = "hedron" },
+  { name = "nvidia-utils", reason = "nvidia-smi, NVML, EGL/X11 GL vendor libs", tier = "required" },
+  { name = "lib32-nvidia-utils", reason = "32-bit GL for older Windows games", tier = "required" },
+  { name = "nvidia-settings", reason = "X config + power/overclock GUI", tier = "recommended" },
+  { name = "nvidia-prime", reason = "PRIME offload on laptops (Optimus/MUX-less)", tier = "recommended" },
+  { name = "opencl-nvidia", reason = "OpenCL for upscaling/RIFE and Blender/Cycles", tier = "recommended" },
+  { name = "libva-nvidia-driver", reason = "NVDEC/NVENC through VA-API for browsers + Instant Replay", tier = "required" },
+  { name = "nvidia-egl-waysupport", reason = "OpenGL on Wayland without XWayland hacks", tier = "optional" },
+]
+firmware_packages = [{ name = "linux-firmware", reason = "GSP firmware blobs (gsp_tu10x/gsp_ga10x.bin)", tier = "required" }]
+cmdline = ["nvidia-drm.modeset=1", "nvidia.NVreg_PreserveVideoMemoryAllocations=1", "nvidia.NVreg_TemporaryFilePath=/var/tmp"]
+post_install = ["hedron-drivers fix-suspend", "nvidia-smi -pm 1 || true"]
+services_enable = ["nvidia-suspend.service", "nvidia-hibernate.service", "nvidia-resume.service"]
+services_mask = ["nvidia-persistenced.service"]
+modprobe.filename = "99-hedron-nvidia.conf"
+modprobe.lines = [
+  "options nvidia NVreg_PreserveVideoMemoryAllocations=1",
+  "options nvidia NVreg_EnableGpuFirmwareLogs=0",
+  "options nvidia NVreg_DynamicPowerManagement=0x02",
+  "blacklist nouveau",
+  "blacklist lbm-nouveau",
+  "install nouveau /bin/false",
+]
+initcpio_modules = ["nvidia", "nvidia_modeset", "nvidia_uvm", "nvidia_drm"]
+environment = { __GL_THREADED_OPTIMIZATIONS = "0", __GL_YIELD = "USLEEP" }
+checks = [
+  { kind = "command", argv = ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], expect_regex = "^[0-9]+\\.[0-9]+" },
+  { kind = "module", name = "nvidia_drm", expect = "loaded", why = "modeset must be live or Wayland falls back" },
+  { kind = "file", path = "/sys/module/nvidia_drm/parameters/modeset", expect_content = "Y" },
+  { kind = "command", argv = ["bash", "-c", "nvidia-smi -q | grep -i 'GSP Firmware Version' -A1"], expect_contains = "GSP", optional = true },
+]
+warnings = [
+  "GSP firmware is required for the open module; do not remove linux-firmware.",
+]
+fallback = { branch = "proprietary-legacy", why = "if DKMS build fails at install we flip to the legacy branch instead of leaving the user with nouveau" }
+
+# Volta / Turing-AD102 pre-open, and the last cards NVIDIA's proprietary driver covers.
+[[vendors.nvidia.branches]]
+name = "proprietary-legacy"
+title = "NVIDIA proprietary driver (last supported branch)"
+priority = 60
+kmod = "nvidia"
+confidence = 0.8
+requires.generation_max = 18
+requires.generation_min = 9
+packages = [
+  { name = "nvidia-470xx-dkms", reason = "470.xx is the last branch for Maxwell/Pascal/Volta", tier = "required" },
+  { name = "linux-hedron-headers", tier = "required", source = "hedron" },
+  { name = "nvidia-470xx-utils", tier = "required" },
+  { name = "lib32-nvidia-470xx-utils", tier = "required" },
+]
+cmdline = ["nvidia-drm.modeset=1"]
+modprobe.filename = "99-hedron-nvidia.conf"
+modprobe.lines = ["blacklist nouveau", "options nvidia NVreg_RegistryDwords=\"EnableBrightnessControl=1\""]
+initcpio_modules = ["nvidia", "nvidia_modeset", "nvidia_uvm", "nvidia_drm"]
+warnings = ["Volta and older cannot use the open kernel module; 470.xx receives no new features."]
+checks = [{ kind = "module", name = "nvidia", expect = "loaded" }]
+fallback = { branch = "nouveau", why = "470 build failed → keep the desktop alive with Mesa" }
+
+# Pre-Fermi / very old: no vendor driver at all. nouveau + Mesa only.
+[[vendors.nvidia.branches]]
+name = "nouveau"
+title = "NVIDIA via nouveau (open-source, no vendor driver)"
+priority = 10
+kmod = "nouveau"
+confidence = 0.5
+requires.generation_max = 8
+packages = [
+  { name = "vulkan-nouveau", reason = "Vulkan driver for NV50+ (needs nvidia-threedots env)", tier = "recommended" },
+]
+modprobe.filename = "99-hedron-nouveau.conf"
+modprobe.lines = ["options nouveau config=NVCPU_DISABLE=1", "options nouveau pstate=0"]
+initcpio_modules = ["drm", "drm_kms_helper", "nouveau"]
+warnings = [
+  "nouveau has no NVENC and weak power management: fine for desktop, poor for AAA gaming.",
+  "For this card a Windows-style gaming experience is not achievable; HedronOS enables MangoHud + gamemode anyway and reports frame stats.",
+]
+checks = [{ kind = "file", path = "/dev/dri/card0", expect = "exists" }]
+
+# ------------------------------------------------------------------------- AMD
+[vendors.amd]
+pci_vendor = "0x1002"
+class_match = ["0x0300", "0x0380", "0x0403"]
+dkms = false
+notes = "Everything GCN1+ is handled by one in-kernel driver (amdgpu); the interesting decisions are about firmware, UVD/VCU and the SMU table."
+
+[[vendors.amd.branches]]
+name = "amdgpu-rdna"
+title = "AMD amdgpu + RADV (RDNA/RDNA2/RDNA3/RDNA4)"
+priority = 100
+kmod = "amdgpu"
+confidence = 0.97
+requires.generation_min = 10
+requires.kmod = "amdgpu"
+packages = [
+  { name = "vulkan-radeon", reason = "RADV — the driver Proton is tuned against", tier = "required" },
+  { name = "lib32-vulkan-radeon", tier = "required" },
+  { name = "libva-mesa-driver", reason = "VA-API UVD/VCU encode+decode", tier = "required" },
+  { name = "mesa-vdpau", reason = "VDPAU for legacy players", tier = "recommended" },
+  { name = "opencl-mesa", reason = "POCL/RADV-CL for upscaling and compute", tier = "recommended" },
+  { name = "amdvlk", reason = "AMD's proprietary Vulkan driver: only for the 2-3 games RADV misrenders", tier = "optional" },
+  { name = "amd-ucode", reason = "CPU microcode (also fixes several SMU hangs)", tier = "required" },
+  { name = "linux-firmware", reason = "amdgpu GC11/GC12 firmware", tier = "required" },
+  { name = "corectrl", reason = "GPU undervolt/fan curves from the desktop", tier = "recommended" },
+]
+cmdline = ["amdgpu.sg_display=0", "amdgpu.dcdebugmask=0x10"]
+modprobe.filename = "99-hedron-amdgpu.conf"
+modprobe.lines = [
+  "options amdgpu si_support=1 cik_support=1",
+  "options amdgpu gpu_recovery=1",
+  "options amdgpu sg_display=0",
+  "options amdgpu pm_display_boost_interval=1",
+  "options kvm_amd avic=1",
+  "options iommu pt",
+]
+initcpio_modules = ["amdgpu"]
+environment = { RADV_DEBUG = "syncves", HEDRON_VK_LAYER = "MangoHUD" }
+services_enable = ["amdgputmc.service"]
+post_install = ["hedron-tune gpu-clock-profile auto"]
+checks = [
+  { kind = "module", name = "amdgpu", expect = "loaded" },
+  { kind = "file", path = "/sys/class/drm/card0/device/power_dpm_force_performance_level", expect = "exists" },
+  { kind = "command", argv = ["vulkaninfo", "--summary"], expect_contains = "RADV" },
+]
+warnings = []
+fallback = { branch = "amdgpu-legacy", why = "GCN1/2 cards predate some firmware shipped today" }
+
+[[vendors.amd.branches]]
+name = "amdgpu-legacy"
+title = "AMD amdgpu (GCN1/GCN2 — si/cik support enabled)"
+priority = 70
+kmod = "amdgpu"
+confidence = 0.8
+requires.generation_min = 7
+requires.generation_max = 9
+requires.kmod = "amdgpu"
+packages = [
+  { name = "vulkan-radeon", tier = "required" },
+  { name = "libva-mesa-driver", tier = "recommended" },
+  { name = "linux-firmware", tier = "required" },
+]
+cmdline = ["amdgpu.sg_display=0"]
+modprobe.filename = "99-hedron-amdgpu.conf"
+modprobe.lines = ["options amdgpu si_support=1", "options amdgpu cik_support=1", "options amdgpu sg_display=0"]
+initcpio_modules = ["amdgpu"]
+warnings = ["SIKKA/Cayman-class cards use the 'old' UVD path: hardware H.264 encode is unavailable, decode is fine."]
+checks = [{ kind = "module", name = "amdgpu", expect = "loaded" }]
+
+[[vendors.amd.branches]]
+name = "radeon-legacy"
+title = "AMD radeon (pre-GCN: TeraScale/RDNA-none)"
+priority = 20
+kmod = "radeon"
+confidence = 0.6
+requires.generation_max = 6
+requires.generation_min = 1
+requires.kmod = "radeon"
+packages = []
+modprobe.filename = "99-hedron-radeon.conf"
+modprobe.lines = ["options radeon dynclks=0", "options radeon audio=1"]
+initcpio_modules = ["radeon"]
+warnings = ["This GPU is only usable for desktop/indie gaming; HedronOS still gives you Store, FlowState and MangoHud."]
+checks = [{ kind = "file", path = "/dev/dri/card0", expect = "exists" }]
+
+# ----------------------------------------------------------------------- Intel
+[vendors.intel]
+pci_vendor = "0x8086"
+class_match = ["0x0300", "0x0380", "0x0403"]
+dkms = false
+notes = "The i915 → xe migration is the one genuinely confusing thing about Intel GPUs today. HedronOS decides from the kernel's own PCI tables, per device id."
+
+[[vendors.intel.branches]]
+name = "xe"
+title = "Intel Xe KMD (Arc dGPU + Lunar Lake and newer iGPU)"
+priority = 100
+kmod = "xe"
+confidence = 0.95
+requires.in_database = true
+requires.kmod = "xe"
+packages = [
+  { name = "vulkan-intel", reason = "ANV", tier = "required" },
+  { name = "lib32-vulkan-intel", tier = "required" },
+  { name = "intel-media-driver", reason = "AV1/HEVC decode on Arc + recent iGPUs", tier = "required" },
+  { name = "level-zero", reason = "oneAPI runtime for upscaling/LLM offload", tier = "recommended" },
+  { name = "intel-ucode", tier = "required" },
+  { name = "compute-runtime", reason = "oneAPI GPU runtime", tier = "optional" },
+]
+cmdline = ["xe.ring_size_exp=12"]
+modprobe.filename = "99-hedron-xe.conf"
+modprobe.lines = ["options xe limits=0x1", "options xe guc_log_level=0", "blacklist i915"]
+initcpio_modules = ["xe"]
+environment = { ANV_DEBUG = "syncval" }
+checks = [
+  { kind = "module", name = "xe", expect = "loaded" },
+  { kind = "command", argv = ["vulkaninfo", "--summary"], expect_contains = "Intel" },
+]
+fallback = { branch = "i915", why = "if xe is not built in this kernel we keep i915" }
+
+[[vendors.intel.branches]]
+name = "i915"
+title = "Intel i915 KMD (Gen9 – Meteor Lake)"
+priority = 80
+kmod = "i915"
+confidence = 0.9
+requires.kmod = "i915"
+requires.generation_min = 7
+packages = [
+  { name = "vulkan-intel", tier = "required" },
+  { name = "lib32-vulkan-intel", tier = "required" },
+  { name = "libva-intel-driver", reason = "iHD is required for Gen11+; this covers Gen8-10", tier = "recommended" },
+  { name = "intel-media-driver", reason = "iHD video driver", tier = "required" },
+  { name = "intel-ucode", tier = "required" },
+]
+cmdline = ["i915.fastboot=1", "i915.enable_psr=2"]
+modprobe.filename = "99-hedron-i915.conf"
+modprobe.lines = ["options i915 enable_psr=2", "options i915 fastboot=1", "options i915 enable_dc=-2", "options i915 modeset=1"]
+initcpio_modules = ["i915"]
+post_install = ["hedron-drivers intel-psr-check"]
+checks = [
+  { kind = "module", name = "i915", expect = "loaded" },
+  { kind = "command", argv = ["bash", "-c", "dmesg | grep -i 'fast boot' | tail -1"], optional = true },
+]
+warnings = ["PSR2 saves battery but adds ~1 ms of frame latency; HedronOS disables it while a game is in the foreground (FlowState) and re-enables it on desktop."]
+
+[[vendors.intel.branches]]
+name = "i915-legacy"
+title = "Intel i915 (pre-Gen9, no Vulkan)"
+priority = 20
+kmod = "i915"
+confidence = 0.6
+requires.generation_max = 6
+requires.kmod = "i915"
+packages = [{ name = "vulkan-intel", tier = "optional" }]
+modprobe.filename = "99-hedron-i915.conf"
+modprobe.lines = ["options i915 enable_dc=-2", "options i915 disable_power_well=0"]
+initcpio_modules = ["i915"]
+warnings = ["Gen7 and older: no Vulkan ICD, so DXVK falls back to OpenGL translation. Indie/2D titles only in practice."]
+checks = [{ kind = "file", path = "/dev/dri/card0", expect = "exists" }]
+
+# -------------------------------------------------------------- virtualisation
+[vendors.qemu]
+pci_vendor = "0x1234"
+class_match = ["0x0300"]
+
+[[vendors.qemu.branches]]
+name = "virtio"
+title = "Virtual machine (virtio-gpu / llvmpipe)"
+priority = 5
+kmod = "virtio_gpu"
+confidence = 0.9
+requires.generation_min = 0
+packages = [
+  { name = "vulkan-virtio", tier = "required" },
+  { name = "spice-vdagent", tier = "recommended" },
+  { name = "qemu-guest-agent", tier = "recommended" },
+]
+initcpio_modules = ["virtio_gpu", "virtio_pci"]
+modprobe.filename = "99-hedron-virt.conf"
+modprobe.lines = []
+warnings = ["You are in a VM: FlowState keeps the GPU profile at 'power-save' and Instant Replay uses a CPU encoder."]
+checks = [{ kind = "file", path = "/dev/dri/renderD128", expect = "exists" }]

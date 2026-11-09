@@ -1,0 +1,41 @@
+# hedronos-store — one signed index, four backends, one transaction. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-store"
+version = "1.0.0"
+release = "1"
+summary = "HedronOS app store: signed cross-backend index, transactions, undo, GUI and CLI"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["python", "bash", "curl", "systemd-libs"]
+build = ["python"]
+check = ["python"]
+optional = ["pacman", "flatpak", "yay", "qml6", "kirigami2", "package-query"]
+
+[install]
+tree = "src"
+vendored = [{ from = "hedronlib", to = "usr/lib/python3.13/site-packages/hedronlib" }]
+
+[install.modes]
+"usr/bin/hstore" = "0755"
+"usr/lib/hedron/hedrostd.py" = "0755"
+"usr/share/hedron/store/Store.qml" = "0644"
+"usr/share/applications/hedron-store.desktop" = "0644"
+"usr/lib/systemd/user/hedrostd.service" = "0644"
+"usr/lib/systemd/user/hedrostd.socket" = "0644"
+"etc/hedron/store.toml" = "0644"
+"usr/share/metainfo/hedron-store.appdata.xml" = "0644"
+"etc/pacman.d/hedron-os.conf" = "0644"
+
+[services]
+enable = ["hedrostd.socket"]
+units = ["usr/lib/systemd/user/hedrostd.service", "usr/lib/systemd/user/hedrostd.socket"]
+
+[files]
+preserve = ["/etc/hedron/store.toml", "/etc/pacman.d/hedron-os.conf"]
+
+[tests]
+modules = ["tests/test_store_index.py", "tests/test_hstore_cli.py"]

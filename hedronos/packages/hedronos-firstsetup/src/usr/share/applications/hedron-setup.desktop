@@ -1,0 +1,15 @@
+# Runs in the LIVE ISO, before the installer touches the disk, so the selection exists by the
+# time partitions are laid out. Opens the GUI chooser when there is a compositor, TUI otherwise.
+# SPDX-License-Identifier: MIT
+[Desktop Entry]
+Type=Application
+Name=HedronOS App Chooser
+GenericName=App selection
+Comment=Pick the apps you want — Steam comes ticked
+Exec=hedron-setup --gui
+Terminal=true
+Icon=system-software-install
+Categories=System;Settings;Qt;
+X-GNOME-Autostart-Phase=Applications
+NoDisplay=true
+X-KDE-autostart-after=panel

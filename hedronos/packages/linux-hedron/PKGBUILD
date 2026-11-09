@@ -1,0 +1,91 @@
+# Maintainer: HedronOS <build@hedronos.local>
+# The kernel package for HedronOS, built from *this* repository — the distro and the kernel share
+# one tree on purpose, so a driver or scheduler change and the distro that ships it land together.
+#
+# Build it on your machine (never on a forge runner):
+#   cd hedronos && ./build.sh --stage kernel --kernel host
+# or the Arch way:
+#   makepkg -si   (from this directory, with the kernel source at the repo root)
+#
+# SPDX-License-Identifier: MIT
+pkgbase=linux-hedron
+pkgname=('linux-hedron' 'linux-hedron-headers')
+_kernelname=hedron
+_major=7
+_patch=0
+_sublevel=0
+pkgver=${_major}.${_patch}.${_sublevel}
+pkgrel=1
+arch=(x86_64 aarch64)
+url="https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license=(GPL2)
+makedepends=(bc bison flex libelf openssl perl python rsync kmod cpio git)   # pahole: dwarves
+# clang/llvm/bpftool/libbpf build tools/sched_ext; the package builds without them and says so.
+options=(!debug !strip)
+_srcdir=${_srcdir:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}   # the kernel tree
+backup=("etc/mkinitcpio.d/${pkgbase}.preset" "etc/sysctl.d/99-hedron-kernel.conf")
+
+# The config is a build *product*: the spec is the source, and the generator drops any symbol this
+# tree does not define. Never hand-edit hedronos_defconfig.
+_prepare_config() {
+  cd "$srcdir/hedronos"
+  python3 tools/gen-defconfig.py --kernel "$srcdir" --out kernel/hedronos_defconfig --require || return 1
+  cp kernel/hedronos_defconfig "$srcdir/.config"
+  # The -rt and immutable-variant overlays are applied on top when requested.
+  if [ -n "${HEDRONOS_KERNEL_FRAGMENT:-}" ]; then
+    cat "$srcdir/hedronos/kernel/$(basename "$HEDRONOS_KERNEL_FRAGMENT")" >> "$srcdir/.config"
+  fi
+  make ARCH=x86_64 olddefconfig
+}
+
+build() {
+  cd "$srcdir"
+  _prepare_config || return 1
+  make ARCH=x86_64 ${MAKEFLAGS:-} -j"$(nproc)"
+
+  # The sched_ext scheduler is part of this package: hedronos-release's features.json probes for
+  # /usr/lib/hedron/scx/scx_hedron, so shipping the kernel without it would make the distro advertise
+  # a feature that cannot exist. Built after the kernel because the BPF object needs the tree's own
+  # headers; with no clang or bpftool we skip loudly rather than fail the whole kernel build.
+  if command -v clang >/dev/null && command -v bpftool >/dev/null; then
+    make -C tools/sched_ext ${MAKEFLAGS:-} -j"$(nproc)" HOSTLDLIBS_scx_hedron="-lelf -lz"       || warning "tools/sched_ext failed to build — scx_hedron will not be installed"
+  else
+    warning "no clang/bpftool: skipping tools/sched_ext (hedron-scheduler.service will have nothing to run)"
+  fi
+}
+
+package_linux-hedron() {
+  pkgdesc="The HedronOS Linux kernel and modules, tuned for gaming"
+  depends=(coreutils kmod linux-firmware mkinitcpio)
+  optdepends=('hedronos-drivers: the GPU driver packages this kernel expects')
+  provides=("linux=${pkgver}" "linux${pkgbase}")
+  conflicts=(linux)
+  cd "$srcdir"
+  make INSTALL_MOD_PATH="$pkgdir/usr" modules_install
+  install -Dm644 arch/x86/boot/bzImage "$pkgdir/boot/vmlinuz-linux-hedron"
+  install -Dm644 .config "$pkgdir/usr/lib/modules/${pkgver}-${pkgrel}-hedron/config"
+  install -Dm644 System.map "$pkgdir/usr/lib/modules/${pkgver}-${pkgrel}-hedron/System.map"
+  install -Dm644 "${srcdir}/hedronos/packages/linux-hedron/usr/lib/modules-load.d/hedron-kernel.conf" \
+    "$pkgdir/usr/lib/modules-load.d/hedron-kernel.conf"
+  install -Dm644 "${srcdir}/hedronos/packages/linux-hedron/etc/sysctl.d/99-hedron-kernel.conf" \
+    "$pkgdir/etc/sysctl.d/99-hedron-kernel.conf"
+  install -Dm644 "${srcdir}/hedronos/packages/linux-hedron/usr/share/hedron/kernel/linux-hedron.preset" \
+    "$pkgdir/etc/mkinitcpio.d/linux-hedron.preset"
+  if [ -x "$srcdir/tools/sched_ext/scx_hedron" ]; then
+    install -Dm755 "$srcdir/tools/sched_ext/scx_hedron" "$pkgdir/usr/lib/hedron/scx/scx_hedron"
+  fi
+  # The scheduler's own licence is in the kernel tree, next to the source it covers.
+  install -Dm644 COPYING "$pkgdir/usr/share/licenses/linux-hedron/COPYING"
+}
+
+package_linux-hedron-headers() {
+  pkgdesc="Headers and scripts to build external modules (DKMS GPU drivers) against linux-hedron"
+  depends=(coreutils)
+  provides=("linux-headers=${pkgver}")
+  conflicts=(linux-headers)
+  cd "$srcdir"
+  install -d "$pkgdir/usr/lib/modules/build"
+  make INSTALL_HDR_PATH="$pkgdir/usr" headers_install
+  cp -a scripts/include/asm-generic "$pkgdir/usr/include/asm" 2>/dev/null || true
+  find . -name '*.cmake' -delete 2>/dev/null || true
+}

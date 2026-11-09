@@ -1,0 +1,23 @@
+# FlowState overlay: Intel GPU hardware.  SPDX-License-Identifier: MIT
+overlay = true
+
+[gpu]
+# i915/xe expose rc6 residency; we keep rc6 (it is fast to exit) but disable the
+# deepest "package C-state" path that costs >200 µs on some SKUs.
+power_profile = "auto"
+
+[sysfs]
+"sys/class/drm/card*/gt_min_freq_mhz" = "auto"
+"sys/class/drm/card*/gt_max_freq_mhz" = "max"
+"sys/devices/system/cpu/intel_pstate/min_perf_pct" = 30
+"sys/module/i915/parameters/enable_dc" = "0"
+"sys/module/xe/parameters/disable_dc" = "5"
+
+[extra]
+dc-off = { mode = "skip", command = "display C-states are off in gaming (enable_dc=0 / disable_dc); that is the whole 'Intel stutter' fix" }
+guc = { mode = "skip", command = "GuC/HuC firmware submission stays on — it is the default and reduces IRQ latency" }
+
+[env]
+# VA-API/JNI: Intel's driver wants this set or VLC/Chrome fall back to software decode.
+LIBVA_DRIVER_NAME = "iHD"
+VDPAU_DRIVER = "va_gl"

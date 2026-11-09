@@ -1,0 +1,25 @@
+# hedron-scheduler.service — run scx_hedron as the system scheduler, when the kernel package provided it.
+#
+# Not enabled by default, and that is the point: a scheduler is a policy decision. The kernel takes
+# its tasks back on its own if a BPF scheduler misbehaves, and the exit reason lands in the journal,
+# which is why shipping this is safe in a way that patching EEVDF never was. `hedron-tune profile
+# gaming` turns it on; a user can enable it directly.
+#
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS sched_ext scheduler (scx_hedron)
+Documentation=https://docs.kernel.org/scheduler/sched-ext.html
+ConditionPathExists=/usr/lib/hedron/scx/scx_hedron
+
+[Service]
+# No timeout: a scheduler runs for the whole session, and `systemctl stop` is the way to hand the
+# machine back to EEVDF. Restart=on-failure, not always — a scheduler that exits non-zero twice in a
+# row is telling you something, and restarting it forever hides the message.
+ExecStart=/usr/lib/hedron/scx/scx_hedron
+Restart=on-failure
+RestartSec=5
+OOMScoreAdjust=-500
+Slice=system.slice
+
+[Install]
+WantedBy=multi-user.target

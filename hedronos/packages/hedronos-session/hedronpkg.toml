@@ -1,0 +1,35 @@
+# hedronos-session — the compositor glue that makes the rest of it feel automatic.
+# SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-session"
+version = "1.0.0"
+release = "1"
+summary = "Session launcher, focus bridge and HDR plumbing for KDE, gamescope and wlroots"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["python", "bash", "dbus-tools"]
+optional = ["kwin", "plasma-workspace", "gamescope", "kdotool", "xdotool", "hyprland", "sway"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-session" = "0755"
+"usr/bin/hedron-session-query" = "0755"
+"usr/lib/hedron/hedron-session-bridge" = "0755"
+"usr/lib/systemd/user/hedron-session-bridge.service" = "0644"
+"usr/share/wayland-sessions/hedron-gamescope.desktop" = "0644"
+"usr/share/wayland-sessions/hedron-deck.desktop" = "0644"
+"usr/share/xsessions/hedron-x11.desktop" = "0644"
+"etc/hedron/session.conf" = "0644"
+
+[services]
+units = ["usr/lib/systemd/user/hedron-session-bridge.service"]
+enable = ["hedron-session-bridge.service"]
+
+[files]
+preserve = ["/etc/hedron/session.conf"]

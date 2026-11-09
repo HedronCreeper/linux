@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Install the apps chosen in the HedronOS installer (deferred retry)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/hedron/selected-apps.json
+ConditionPathExists=!/var/lib/hedron/apps-installed
+
+[Service]
+Type=oneshot
+# One step at a time so a package that fails to download does not abort the rest; the
+# marker file is only written when everything the user picked is present, so an interrupted
+# run resumes where it stopped instead of starting over.
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedron-firstboot.py --only selected-apps --force
+ExecStartPost=/usr/bin/sh -c 'if hstore check-selection --quiet; then : > /var/lib/hedron/apps-installed; systemctl disable --now hedron-firstapps.timer; fi'

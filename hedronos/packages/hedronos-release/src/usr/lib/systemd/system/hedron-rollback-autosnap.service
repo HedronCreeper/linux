@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS rollback: keep a weekly safety snapshot
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+ConditionPathExists=/var/lib/hedron/rollback/enable
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedron-rollback.py snapshot --reason "weekly" --keep 8
+ExecStartPost=/usr/bin/python3 /usr/lib/hedron/hedron-rollback.py gc --age-days 30

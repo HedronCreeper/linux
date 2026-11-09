@@ -1,0 +1,27 @@
+# HedronOS graphics rules — SPDX-License-Identifier: MIT
+#
+# Two jobs only: (1) re-run driver convergence when a display device appears or
+# disappears (eGPU docks, Thunderbolt, VFIO hand-offs), and (2) give the seated user
+# direct access to the GPU sysfs attributes CoreCtrl/FlowState need, without making
+# /dev/dri world-writable.
+#
+# Debounced on purpose: udev fires several times per hotplug event and a module reload
+# storm is exactly what you do NOT want while a game is running.
+
+# --- 1. hotplug convergence -----------------------------------------------------
+ACTION=="add", SUBSYSTEM=="pci", ATTR{class}=="0x0300*", RUN+="/usr/bin/ionice -c3 /usr/bin/nice -n 19 /usr/bin/systemd-run --quiet --no-block /usr/lib/hedron/driverd.py --hotplug"
+ACTION=="remove", SUBSYSTEM=="pci", ATTR{class}=="0x0300*", RUN+="/usr/bin/systemd-run --quiet --no-block /usr/lib/hedron/driverd.py --hotplug"
+ACTION=="add", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", RUN+="/usr/bin/systemd-run --quiet --no-block /usr/lib/hedron/driverd.py --hotplug"
+
+# --- 2. power management access for the logged-in user --------------------------
+# amdgpu: perf level + custom powersave profile; nvidia: /proc/driver/nvidia/power*
+SUBSYSTEM=="drm", KERNEL=="card*", ATTR{device/power_dpm_force_performance_level}=="", GOTO="hedron_gpu_end"
+TAG+="uaccess", SUBSYSTEM=="drm", KERNEL=="renderD*", GROUP="video"
+# DDC/CI passthrough so hedron-pulse can talk to the monitor without root.
+KERNEL=="i2c-[0-9]*", TAG+="uaccess"
+# Backlight for handhelds/laptops (FlowState dim-on-idle, resume brightness restore).
+SUBSYSTEM=="backlight", TAG+="uaccess", TAG+="systemd"
+# HDMI/DP audio jack state used by the overlay to mute game audio on unplug.
+SUBSYSTEM=="sound", ATTR{class}=="0403*", TAG+="uaccess"
+
+LABEL="hedron_gpu_end"

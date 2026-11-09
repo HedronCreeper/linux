@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""hedron-vitals — the terminal HUD, and the CLI other tools script against.
+
+  hedron-vitals                 one snapshot, human-readable
+  hedron-vitals --json        one snapshot, machine-readable
+  hedron-vitals watch          live TUI (no ncurses: we render with ANSI and no deps)
+  hedron-vitals history -n 300 --spark  print a frame-time sparkline from the ring
+  hedron-vitals csv --out f.csv          stream samples to CSV for later analysis
+  hedron-vitals why-laggy              interpret the last 10 s and name the likely cause
+
+`why-laggy` is the interesting one: it is a small rule set over PSI, clocks, GPU busy and
+temperature, written down instead of living in a forum post. It will tell you "you are
+thermally capped, 91 °C with gpu_busy 99 %, so no amount of CPU tuning helps" — the kind of
+answer that ends a support thread.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+LATEST = "/run/hedron/vitals.json"
+SOCK = os.environ.get("HEDRON_VITALS_SOCK") or "/run/hedron/vitals.sock"
+RING = []
+
+
+def fetch(timeout: float = 1.0) -> dict:
+    """Prefer the daemon's socket (instant, always the newest); fall back to the file."""
+    if os.path.exists(SOCK):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect(SOCK)
+            data = s.recv(65536)
+            s.close()
+            if data:
+                return json.loads(data.decode().strip())
+        except (OSError, json.JSONDecodeError):
+            pass
+    try:
+        with open(LATEST, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def need_daemon() -> str:
+    return ("no sample available — start the sampler:  systemctl --user start hedron-vitalsd.service"
+            "   (or run `hedron-vitalsd --once` to see the data without a daemon)")
+
+
+SPARK = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values: list[float], width: int = 48) -> str:
+    if not values:
+        return "(no data)"
+    values = values[-width:]
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-6:
+        return SPARK[3] * len(values)
+    return "".join(SPARK[int((v - lo) / (hi - lo) * 7)] for v in values)
+
+
+def human(doc: dict) -> str:
+    if not doc:
+        return need_daemon()
+    lines = []
+    game = doc.get("game", {})
+    if game:
+        lines.append("fps       %6.0f   frame %5.2f ms   p95 %5.2f   p99 %5.2f"
+                     % (game.get("fps", 0), game.get("frametime_ms", 0), game.get("p95_ms", 0),
+                        game.get("p99_ms", 0)))
+        lines.append("frametime %s" % sparkline([game.get("frametime_ms", 0)]))
+    cpu = doc.get("cpu", {})
+    if cpu:
+        lines.append("cpu       %6.0f MHz avg / %5.0f max  (boost %.0f%% of rated, %d cores)"
+                     % (cpu.get("mhz_avg", 0), cpu.get("mhz_max", 0), cpu.get("boost_pct", 0),
+                        int(cpu.get("cores", 0))))
+    gpu = doc.get("gpu", {})
+    if gpu:
+        extra = ""
+        if "vram_mib" in gpu:
+            extra = "  VRAM %.1f/%.1f GiB" % (gpu["vram_mib"] / 1024.0, gpu.get("vram_total_mib", 0) / 1024.0)
+        lines.append("gpu       %3.0f%% busy%s" % (gpu.get("percent", 0), extra))
+    if doc.get("temp_c"):
+        limit = 90 if doc["temp_c"] > 85 else 200
+        flag = "  ⚠ thermal" if doc["temp_c"] >= 88 else ""
+        lines.append("temp      %5.1f °C hottest, %5.1f W%s" % (doc["temp_c"], doc.get("power_w", 0), flag))
+    for chip, values in sorted((doc.get("temps") or {}).items())[:6]:
+        lines.append("            %-28s %5.1f °C" % (chip, values))
+    mem = doc.get("mem", {})
+    if mem:
+        lines.append("memory    %4.1f/%4.1f GiB (%.0f%%)   zram %.1f GiB"
+                     % (mem.get("used", 0), mem.get("MemTotal", 0), mem.get("used_pct", 0),
+                        mem.get("Zswapped", 0)))
+    psi = doc.get("psi", {})
+    if psi:
+        lines.append("pressure  cpu %4.1f%%  io %4.1f%%  mem %4.1f%%  (some%%)"
+                     % (psi.get("some_cpu", 0), psi.get("some_io", 0), psi.get("some_memory", 0)))
+    load = doc.get("load", {})
+    if load:
+        lines.append("load      %.2f / %.2f / %.2f" % (load.get("m1", 0), load.get("m5", 0), load.get("m15", 0)))
+    bat = doc.get("battery", {})
+    if bat:
+        lines.append("battery   %3.0f%%  %s%s" % (bat.get("percent", 0), bat.get("status", "?"),
+                 "  %.1f W" % bat["watts"] if "watts" in bat else ""))
+    fans = doc.get("fans", {})
+    if fans:
+        lines.append("fans      " + "  ".join("%s %.0f%%" % (k, v) for k, v in sorted(fans.items())[:4]))
+    if doc.get("stale"):
+        lines.append("(sample is stale — the daemon stopped updating)")
+    return "\n".join(lines) or json.dumps(doc, indent=1, sort_keys=True)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    if not os.path.exists(LATEST) and not os.path.exists(SOCK):
+        print(need_daemon(), file=sys.stderr)
+        return 1
+    interval = max(0.2, args.interval)
+    try:
+        while True:
+            doc = fetch()
+            if args.json:
+                print(json.dumps(doc, sort_keys=True), flush=True)
+            else:
+                body = human(doc)
+                try:
+                    size = os.get_terminal_size().columns
+                except (OSError, ValueError):
+                    size = 80      # `hedron-vitals watch >file` has no tty to measure
+                head = "HedronOS vitals — every %.1fs (Ctrl-C to quit)" % interval
+                sys.stdout.write("\033[H\033[2J" + head + "\n" + body + "\n" + " " * max(0, size))
+                sys.stdout.flush()
+            RING.append(doc)
+            if len(RING) > 600:
+                del RING[:300]
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print()
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    samples = []
+    deadline = time.time() + args.seconds
+    while time.time() < deadline and len(samples) < args.n:
+        doc = fetch()
+        ft = doc.get("game", {}).get("frametime_ms")
+        if ft:
+            samples.append(float(ft))
+        time.sleep(args.interval)
+    if not samples:
+        print("no frametime data in the last %g s (no game publishing frame stats)" % args.seconds)
+        return 1
+    print("frametime ms: min %.2f  avg %.2f  max %.2f  spread %.2f"
+          % (min(samples), sum(samples) / len(samples), max(samples), max(samples) - min(samples)))
+    print(sparkline(samples, width=min(72, len(samples))))
+    if min(samples) < 8 and max(samples) > 20:
+        print("→ that is a spiky trace: something takes 2× the frame budget occasionally. "
+              "`hedron-vitals why-laggy` names the usual suspects.")
+    return 0
+
+
+def cmd_why(args: argparse.Namespace) -> int:
+    doc = fetch()
+    if not doc:
+        print(need_daemon(), file=sys.stderr)
+        return 1
+    causes: list[tuple[int, str]] = []
+    psi = doc.get("psi", {})
+    game = doc.get("game", {})
+    gpu = doc.get("gpu", {})
+    temp = doc.get("temp_c", 0)
+    ewma = doc.get("ewma", {})
+    ft = game.get("frametime_ms", 0)
+    if temp >= 88:
+        causes.append((90, "Thermal: hottest sensor is %.1f °C. The driver is throttling; no CPU "
+                           "tuning helps until this is fixed (fan curve, `hedron-tune apply performance` "
+                           "on a desktop, or clean the heatsink)." % temp))
+    elif temp >= 82:
+        causes.append((45, "Getting hot (%.1f °C): expect occasional dips. `hedron-tune apply silence` "
+                           "trades ~5%% fps for a much flatter trace." % temp))
+    if psi.get("some_io", 0) > 3.0:
+        causes.append((80, "I/O stall pressure is %.1f%%: the game is waiting on disk. Check whether it "
+                           "is on a spinning disk or a nearly full SSD, and whether a shader compile or "
+                           "download is running (`hedron-doctor io`)." % psi["some_io"]))
+    if psi.get("some_cpu", 0) > 8.0:
+        causes.append((70, "CPU runqueue pressure is %.1f%%: you are CPU-bound with more threads than "
+                           "cores. Lower the game's thread count or close browsers; scx_hedron already "
+                           "prioritises the game slice." % psi["some_cpu"]))
+    if psi.get("some_memory", 0) > 1.0:
+        causes.append((85, "Memory pressure is %.1f%%: you are swapping. HedronOS uses zram first; if "
+                           "that is full, close something or add `hedron-tune`'s battery of vm tweaks "
+                           "is not enough — this is a capacity problem." % psi["some_memory"]))
+    mem = doc.get("mem", {})
+    if mem.get("used_pct", 0) > 92:
+        causes.append((60, "Only %.1f GiB free of %.1f GiB (%.0f%% used)." % (
+            mem.get("MemTotal", 0) - mem.get("used", 0), mem.get("MemTotal", 0), mem.get("used_pct", 0))))
+    if gpu.get("percent", 0) >= 97 and ft and ft > 7.5:
+        causes.append((50, "GPU is saturated (%.0f%% busy) at %.1f ms/frame: that is the frame budget, "
+                           "not a Linux problem. Drop one graphics setting." % (gpu.get("percent", 0), ft)))
+    cpu = doc.get("cpu", {})
+    if cpu and cpu.get("boost_pct", 100) < 70 and not causes:
+        causes.append((65, "CPUs are only at %.0f%% of rated clock with no thermal reason — check the "
+                           "power source (on battery we deliberately downclock), and try "
+                           "`hedron-tune apply performance`." % cpu.get("boost_pct", 0)))
+    if ewma.get("fps", 0) and ft and ewma["fps"] > 0 and (max(0.0, float(game.get("p99_ms", ft))) - ft) > 2 * ft:
+        causes.append((55, "Average is fine (%.1f ms) but p99 is %.1f ms: pacing hitching, typically a "
+                           "shader compile, an anti-cheat poll, or compositor queueing. Try `MESA_VK_WSI_PRESENT_MODE=mailbox` "
+                           "already set by FlowState gaming, and disable the browser hardware acceleration."
+                   % (ft, game.get("p99_ms", 0))))
+    if not causes:
+        print("Nothing in the sampled 10 s explains a hiccup: no thermal, I/O, CPU or memory pressure, "
+              "GPU %.0f%% busy, %.1f ms frames.\nIf it still feels bad, the problem is likely inside the "
+              "game (engine, vsync, driver) — record it and compare:\n  hedron-replay mark … "
+              "hedron-replay save-around" % (gpu.get("percent", 0), ft))
+        return 0
+    causes.sort(reverse=True)
+    print("Likely causes, most probable first:\n")
+    for _, text in causes:
+        print("  • " + text.replace("\n", "\n    "))
+    print("\n(sampled %s; data from hedron-vitalsd)" % time.strftime("%H:%M:%S", time.localtime(doc.get("t", 0))))
+    return 0
+
+
+def cmd_csv(args: argparse.Namespace) -> int:
+    keys = ["game.fps", "game.frametime_ms", "game.p95_ms", "game.p99_ms", "gpu.percent",
+            "cpu.mhz_avg", "cpu.boost_pct", "temp_c", "power_w", "mem.used", "psi.some_cpu", "psi.some_io"]
+    out = open(args.out, "w", encoding="utf-8") if args.out != "-" else sys.stdout
+    out.write("t," + ",".join(k.replace(".", "_") for k in keys) + "\n")
+    try:
+        while args.seconds <= 0 or time.time() < started + args.seconds:
+            doc = fetch()
+            row = [str(int(doc.get("t", time.time())))]
+            for key in keys:
+                node: object = doc
+                for part in key.split("."):
+                    node = node.get(part) if isinstance(node, dict) else None
+                row.append("%.3f" % float(node) if isinstance(node, (int, float)) else "")
+            out.write(",".join(row) + "\n")
+            out.flush()
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if out is not sys.stdout:
+            out.close()
+            print("wrote %s" % args.out)
+    return 0
+
+
+started = time.time()
+
+
+def hud_flag() -> str:
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    return os.path.join(runtime, "hedron", "hud.enabled")
+
+
+def cmd_toggle(args: argparse.Namespace) -> int:
+    """Flip the HUD flag the panel applet polls.
+
+    A global shortcut that talked to KWin directly would need a compositor-specific plugin; a
+    flag file works from Sway, Hyprland, GNOME, X11 and a VT, and it survives a compositor
+    restart because it is not the compositor's state.
+    """
+    path = hud_flag()
+    on = os.path.exists(path)
+    want = {"on": True, "off": False, "toggle": not on}[args.state]
+    if want:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("%d\n" % int(time.time()))
+        except OSError as exc:
+            print("could not write %s: %s" % (path, exc.strerror or exc), file=sys.stderr)
+            return 1
+    else:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print("could not remove %s: %s" % (path, exc), file=sys.stderr)
+            return 1
+    if args.json:
+        print(json.dumps({"hud": want, "flag": path}))
+    else:
+        print("vitals HUD %s (%s)" % ("shown" if want else "hidden", path))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-vitals", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--interval", type=float, default=0.5)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("snapshot")
+    sub.add_parser("watch").set_defaults(func=cmd_watch)
+    p = sub.add_parser("history")
+    p.add_argument("-n", type=int, default=300)
+    p.add_argument("--seconds", type=float, default=10.0)
+    p.set_defaults(func=cmd_history)
+    sub.add_parser("why-laggy").set_defaults(func=cmd_why)
+    p = sub.add_parser("csv")
+    p.add_argument("--out", default="-")
+    p.add_argument("--seconds", type=float, default=30.0)
+    p.set_defaults(func=cmd_csv)
+    p = sub.add_parser("toggle", help="show/hide the HUD (the key the KWin script binds)")
+    p.add_argument("state", nargs="?", choices=["on", "off", "toggle"], default="toggle")
+    p.set_defaults(func=cmd_toggle)
+    args = ap.parse_args(argv)
+    global started
+    started = time.time()
+    if args.cmd in (None, "snapshot"):
+        doc = fetch()
+        print(json.dumps(doc, indent=1, sort_keys=True) if args.json else human(doc))
+        return 0 if doc else 1
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

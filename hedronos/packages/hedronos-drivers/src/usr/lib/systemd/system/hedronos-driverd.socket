@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS driver planning socket (used by the installer and hedron-store)
+Documentation=file:/usr/share/doc/hedronos-drivers/README.md
+
+[Socket]
+ListenStream=/run/hedron/driverd.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=wheel
+# systemd-socket-activate hands us stdin; the daemon speaks one JSON object per line.
+Service=hedronos-driverd.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

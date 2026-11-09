@@ -1,0 +1,38 @@
+# hedronos-capture — instant replay + clip saving.  SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-capture"
+version = "1.0.0"
+release = "1"
+summary = "Rolling NVENC/AMF/VAAPI replay buffer, lossless clip saving and a share-ready export"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["ffmpeg", "bash", "coreutils", "findutils"]
+check = ["python"]
+optional = ["wf-recorder", "gamescope", "libpipewire", "xdg-user-dir"]
+
+[provides]
+packages = ["hedronos-replay"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-replay" = "0755"
+"usr/bin/hedron-share" = "0755"
+"usr/lib/hedron/hedron-replayd.py" = "0755"
+"usr/lib/systemd/user/hedron-replayd.service" = "0644"
+"etc/xdg/autostart/hedron-replay.desktop" = "0644"
+"etc/hedron/replay.conf" = "0644"
+
+[services]
+units = ["usr/lib/systemd/user/hedron-replayd.service"]
+
+[files]
+preserve = ["/etc/hedron/replay.conf"]
+
+[tests]
+modules = ["tests/test_replay_ring.py"]

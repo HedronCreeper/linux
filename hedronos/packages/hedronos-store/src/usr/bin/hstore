@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""hstore — the HedronOS app store, in a terminal and in one command.
+
+  hstore search launcher                fuzzy-ish search across all four backends
+  hstore info steam                     where it comes from, size, tier, what install does
+  hstore list --category gaming          browse
+  hstore install steam discord           plan → confirm → apply (writes a rollback snapshot)
+  hstore install --from-selection        install exactly what the installer's chooser recorded
+  hstore remove obs-studio
+  hstore update                          pacman + flatpak + AUR, one transaction, one confirm
+  hstore undo [token]                   revert the last store transaction
+  hstore status / hstore stats / hstore journal -n 20
+  hstore check-selection                  is everything the user ticked actually installed?
+  hstore verify                          re-verify the index signature and the installed set
+  hstore update --force-index            refresh the index from the mirror (or the ISO cache)
+  hstore gui                             open the QML store window (falls back to `list --gui`)
+
+Design note: hstore never runs a package manager without saying the command first, and
+`--dry-run` is available on every mutating verb, because "the store did something to my
+system" is the single most common complaint about software centres.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", os.path.join(_HERE, "..", "lib")):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")) and _cand not in sys.path:
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(8):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+if os.path.isdir(os.path.join(_HERE, "..", "lib", "hedron")):
+    sys.path.insert(2, os.path.abspath(os.path.join(_HERE, "..", "lib", "hedron")))
+
+from hedronlib.util import human_bytes, table  # noqa: E402
+
+SELECTION = "/var/lib/hedron/selected-apps.json"
+
+
+def daemon(payload: dict, timeout: float = 20.0) -> dict | None:
+    """Ask hedrostd if it is up; the daemon owns the journal and the serialisation lock."""
+    sock = os.environ.get("HEDRON_STORE_SOCK") or "/run/hedron/store/sock"
+    if not os.path.exists(sock):
+        return None
+    try:
+        import socket as _socket
+
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(sock)
+        s.sendall((json.dumps(payload) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        return json.loads(buf.decode().strip().splitlines()[-1])
+    except (OSError, ValueError):
+        return None
+
+
+def local() -> object:
+    """No daemon? Do the same work here — read-only, and with a warning when mutating."""
+    try:
+        import hedrostd  # shipped beside hstore in /usr/lib/hedron
+    except ImportError:
+        here = os.path.join(_HERE, "..", "lib", "hedron")
+        sys.path.insert(0, os.path.abspath(here))
+        import hedrostd  # type: ignore
+    return hedrostd.Store(hedrostd.conf())
+
+
+def call(payload: dict, *, allow_local_fallback: bool = True) -> dict:
+    reply = daemon(payload)
+    if reply is not None:
+        return reply
+    if not allow_local_fallback:
+        return {"ok": False, "error": "hedrostd is not running"}
+    store = local()
+    import hedrostd  # type: ignore
+
+    return hedrostd.handle_line(store, json.dumps(payload))
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "search", "q": " ".join(args.query), "category": args.category or "",
+                  "source": args.source or "", "tier": args.tier or "", "limit": args.limit})
+    if not reply.get("ok"):
+        print("hstore: %s" % reply.get("error") or reply.get("reason"), file=sys.stderr)
+        return 1
+    rows = [[e["id"], e.get("source", ""), e.get("category", ""), e.get("tier", ""),
+             e.get("provider", ""), (e.get("summary") or "")[:60]] for e in reply["results"]]
+    if args.json:
+        print(json.dumps(reply, indent=1, sort_keys=True))
+        return 0
+    if not rows:
+        print("nothing matched %r (try `hstore list`)" % " ".join(args.query))
+        return 1
+    print(table(rows, headers=["app", "backend", "category", "tier", "provides", "summary"]))
+    print("\n%d of %d match(es)" % (len(rows), reply.get("total", len(rows))))
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "search", "q": "", "category": args.category or "", "source": args.source or "",
+                  "tier": args.tier or "", "limit": 1000})
+    entries = reply.get("results", [])
+    if args.installed_only:
+        installed = installed_ids()
+        entries = [e for e in entries if e["id"] in installed]
+    if args.json:
+        print(json.dumps(entries, indent=1, sort_keys=True))
+        return 0
+    if not entries:
+        print("nothing to list")
+        return 0
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        groups.setdefault(entry.get("category", "other"), []).append(entry)
+    for category in sorted(groups):
+        print("\n%s" % category)
+        rows = [["  " + e["id"], e.get("source", "?"), e.get("provider", ""), e.get("tier", ""),
+                 "%.0f MiB" % e.get("size_mib", 0), "locked" if e.get("locked") or "locked" in (e.get("flags") or [])
+                 else ("default" if any(str(f).startswith("default:") for f in (e.get("flags") or [])) else "")]
+                for e in sorted(groups[category], key=lambda a: a["id"])]
+        print(table(rows, headers=["app", "backend", "provides", "tier", "size", "note"]))
+    print("\n%d app(s) in %d categories" % (len(entries), len(groups)))
+    return 0
+
+
+def cmd_info(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "info", "app": args.app})
+    entry = reply.get("entry")
+    if not entry:
+        print("hstore: no such app %r (`hstore search %s`)" % (args.app, args.app[:4]), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(entry, indent=1, sort_keys=True))
+        return 0
+    print("%s — %s" % (entry["name"], entry.get("summary", "")))
+    print("  id        %s" % entry["id"])
+    print("  category  %s      tier %s      size ~%.0f MiB" % (entry.get("category"), entry.get("tier"),
+                                                               entry.get("size_mib", 0)))
+    print("  backend   %s: %s" % (entry.get("source"), entry.get("provider")))
+    if entry.get("flags"):
+        print("  flags     %s" % ", ".join(entry["flags"]))
+    if entry.get("install"):
+        print("  after     %s" % "; ".join(entry["install"]))
+    print("\n  install with:  hstore install %s" % entry["id"])
+    return 0
+
+
+def installed_ids() -> set[str]:
+    """Which catalogue ids are satisfied right now, per backend."""
+    out: set[str] = set()
+    try:
+        reply = call({"cmd": "search", "q": "", "limit": 2000})
+        entries = reply.get("results", [])
+    except Exception:  # noqa: BLE001
+        entries = []
+    by_source: dict[str, list[str]] = {}
+    for entry in entries:
+        by_source.setdefault(entry.get("source", "pacman"), []).append(entry.get("provider") or entry["id"])
+    if by_source.get("pacman") and shutil_which("pacman"):
+        proc = subprocess.run(["pacman", "-Qqe"], capture_output=True, text=True)
+        have = {l.split()[0] for l in proc.stdout.splitlines()} if proc.returncode == 0 else set()
+        for entry in entries:
+            if entry.get("source") in ("pacman", "hedron") and entry.get("provider") in have:
+                out.add(entry["id"])
+    if by_source.get("flatpak") and shutil_which("flatpak"):
+        proc = subprocess.run(["flatpak", "list", "--app", "--columns=application"], capture_output=True, text=True)
+        have = set(proc.stdout.split()) if proc.returncode == 0 else set()
+        for entry in entries:
+            if entry.get("source") == "flatpak" and entry.get("provider") in have:
+                out.add(entry["id"])
+    for entry in entries:
+        if entry.get("source") == "appimage" and os.path.exists(os.path.expanduser("~/Applications/%s.AppImage"
+                                                                                     % entry["id"])):
+            out.add(entry["id"])
+    return out
+
+
+def shutil_which(name: str):
+    from shutil import which
+
+    return which(name)
+
+
+def plan(args: argparse.Namespace, *, install: list[str], remove: list[str] | None = None,
+          update_all: bool = False) -> dict:
+    return call({"cmd": "plan", "install": install, "remove": remove or [], "update_all": update_all})
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    reply = plan(args, install=args.app, update_all=args.all)
+    print(json.dumps(reply, indent=1, sort_keys=True) if args.json else render_plan(reply))
+    return 0 if reply.get("ok") else 1
+
+
+def render_plan(reply: dict) -> str:
+    if not reply.get("ok"):
+        return "hstore: cannot plan: %s" % (reply.get("reason") or reply.get("error")
+                                            or "unknown app(s): %s" % ", ".join(reply.get("unknown", [])))
+    lines = ["Plan (%d step(s), ~%.0f MiB of downloads):" % (len(reply["steps"]), reply.get("total_mib", 0))]
+    for step in reply["steps"]:
+        cmd = step_cmd(step)
+        lines.append("  %-8s %-10s %-28s %s" % (step["op"], step.get("source", "?"), step.get("provider", ""),
+                                               cmd or "(no command: backend not installed)"))
+    for warn in reply.get("warnings", []):
+        lines.append("  ! " + warn)
+    if reply.get("unknown"):
+        lines.append("  ! unknown app ids: " + ", ".join(reply["unknown"]))
+    lines.append("\ntoken: %s (expires in 5 min)" % reply.get("token", "-"))
+    lines.append("apply with: hstore install --token %s   (or run install without --dry-run)" % reply.get("token", ""))
+    return "\n".join(lines)
+
+
+def step_cmd(step: dict) -> str:
+    reply = call({"cmd": "explain"})
+    # The daemon owns command construction; for display we re-derive it in the same way
+    # rather than duplicating the mapping here.
+    try:
+        import hedrostd  # type: ignore
+
+        cmd = hedrostd.command_for(step, reply.get("explain", {}).get("config", {}))
+    except Exception:  # noqa: BLE001
+        cmd = []
+    return " ".join(cmd)
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    install = list(args.app)
+    if args.from_selection:
+        try:
+            doc = json.load(open(SELECTION, encoding="utf-8"))
+            install += [a["app"] for a in doc.get("apps", []) if a.get("selected", True)]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            print("hstore: no installer selection at %s (fine — nothing to add)" % SELECTION, file=sys.stderr)
+    if not install and not args.all:
+        print("hstore: nothing to do (give app ids, or --from-selection, or --all)", file=sys.stderr)
+        return 2
+    reply = plan(args, install=install, update_all=args.all)
+    if not reply.get("ok"):
+        print(render_plan(reply), file=sys.stderr)
+        return 1
+    print(render_plan(reply))
+    if args.dry_run:
+        print("\n--dry-run: nothing applied")
+        return 0
+    if not args.yes:
+        try:
+            answer = input("\nApply? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("cancelled")
+            return 130
+    applied = call({"cmd": "apply", "token": reply.get("token", ""), "install": install,
+                    "update_all": args.all, "dry_run": False}, allow_local_fallback=not args.require_daemon)
+    ok = applied.get("ok")
+    for step in applied.get("steps", []):
+        mark = "ok" if step.get("rc") in (0, None) else "FAILED"
+        print("  [%s] %s %s %s" % (mark, step["op"], step.get("source"), step.get("provider")))
+        if step.get("rc") not in (0, None):
+            for line in (step.get("tail") or [])[-2:]:
+                print("       " + line[:160])
+    if ok:
+        print("\ndone (transaction %s). `hstore undo %s` reverts it; a rollback snapshot was taken."
+              % (applied.get("token"), applied.get("token")))
+        if args.enable_units:
+            subprocess.run(["hedron-drivers", "apply", "--if-needed"], capture_output=True, text=True)
+        return 0
+    print("\nFAILED: %s" % applied.get("reason"), file=sys.stderr)
+    print("nothing was left half-applied beyond what is printed above; run `hstore undo %s`"
+          % applied.get("token", ""), file=sys.stderr)
+    return 1
+
+
+def cmd_remove(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "plan", "install": [], "remove": list(args.app)})
+    if not reply.get("ok"):
+        print("hstore: %s" % (reply.get("reason") or "unknown app(s)"), file=sys.stderr)
+        return 1
+    print(render_plan(reply))
+    if args.dry_run:
+        return 0
+    if not args.yes:
+        print("\nRemoving apps also removes their *dependencies* that nothing else needs (pacman -Rns).")
+        try:
+            if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
+                return 130
+        except EOFError:
+            return 130
+    applied = call({"cmd": "apply", "token": reply.get("token", ""), "remove": list(args.app)})
+    print("done" if applied.get("ok") else "FAILED: %s" % applied.get("reason"))
+    return 0 if applied.get("ok") else 1
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    if args.index:
+        reply = call({"cmd": "refresh", "force": True})
+        print("index: %s" % json.dumps(reply, sort_keys=True))
+        return 0 if reply.get("ok") else 1
+    reply = call({"cmd": "plan", "install": [], "update_all": True})
+    print(render_plan(reply))
+    if args.dry_run:
+        return 0
+    if not args.yes and input("Apply updates? [y/N] ").strip().lower() not in ("y", "yes"):
+        return 130
+    applied = call({"cmd": "apply", "token": reply.get("token", ""), "update_all": True})
+    print("updated" if applied.get("ok") else "FAILED: %s" % applied.get("reason"))
+    return 0 if applied.get("ok") else 1
+
+
+def cmd_undo(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "undo", "token": args.token, "apply": not args.plan_only})
+    if not reply.get("ok"):
+        print("hstore: %s" % reply.get("reason"), file=sys.stderr)
+        return 1
+    if args.plan_only:
+        print("would revert transaction %s:" % reply.get("token"))
+        for step in reply.get("steps", []):
+            print("  %-8s %-10s %s" % (step["op"], step.get("source"), step.get("provider")))
+        return 0
+    print("reverted (transaction %s)" % reply.get("token", "?"))
+    for step in reply.get("steps", []):
+        print("  [%s] %s %s %s" % ("ok" if step.get("rc") in (0, None) else "FAILED", step["op"],
+                                  step.get("source"), step.get("provider")))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "status"})
+    if args.json:
+        print(json.dumps(reply, indent=1, sort_keys=True))
+        return 0
+    stats = reply.get("stats", {})
+    print("store        %s" % ("daemon" if daemon({"cmd": "ping"}) else "no daemon (running in-process)"))
+    print("index        %s  (%s entries)" % (reply.get("index"), reply.get("entries", 0)))
+    print("verification %s" % (reply.get("verification") or
+                               ("signed + verified" if reply.get("verified") else "unsigned / unverified")))
+    print("mirror       %s" % reply.get("mirror"))
+    print("journal      %s event(s) in the transaction log" % reply.get("journal_lines", 0))
+    if stats:
+        print("backends     " + ", ".join("%s %d" % (k, v) for k, v in sorted(stats.get("by_source", {}).items())))
+        print("tiers        " + ", ".join("%s %d" % (k, v) for k, v in sorted(stats.get("by_tier", {}).items())))
+        print("all apps     ~%s if everything were installed" % human_bytes(stats.get("total_mib", 0) * 1048576))
+    return 0
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "status"})
+    stats = reply.get("stats", {})
+    if args.oneline:
+        return print("index %s apps, %s verified, mirror %s" % (stats.get("entries", 0), "on" if reply.get("verified") else "off",
+                                                                 reply.get("mirror", "?"))) or 0
+    print(json.dumps(stats, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_journal(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "journal", "limit": args.limit})
+    for event in reply.get("events", []):
+        print("%s  %-14s %s" % (time_str(event.get("when")), event.get("event"),
+                               json.dumps({k: v for k, v in event.items()
+                                           if k not in ("when", "event")}, sort_keys=True)[:150]))
+    if not reply.get("events"):
+        print("journal is empty")
+    return 0
+
+
+def time_str(epoch) -> str:
+    import time
+
+    return time.strftime("%m-%d %H:%M:%S", time.localtime(epoch)) if epoch else "-"
+
+
+def cmd_check_selection(args: argparse.Namespace) -> int:
+    """The promise check: everything the user ticked in the installer must be installed."""
+    try:
+        doc = json.load(open(args.selection, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print("hstore: cannot read %s: %s" % (args.selection, exc), file=sys.stderr)
+        return 1 if args.quiet else 1
+    want = {a["app"] for a in doc.get("apps", []) if a.get("selected", True)}
+    have = installed_ids()
+    missing = sorted(want - have)
+    if args.quiet:
+        return 0 if not missing else 1
+    print("selection: %d app(s) requested, %d present, %d missing" % (len(want), len(want) - len(missing),
+                                                                       len(missing)))
+    for app in missing:
+        print("  missing: " + app)
+    if missing:
+        print("\nfix with:  hstore install %s" % " ".join(missing))
+        return 1
+    print("all selected apps are installed — including steam: %s" % ("yes" if "steam" in have else "NO (broken!)"))
+    return 0 if "steam" in have else 1
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Re-verify the index signature and, optionally, that each installed app still works."""
+    reply = call({"cmd": "status"})
+    ok = bool(reply.get("verified"))
+    print("index signature: %s" % ("verified" if ok else "NOT verified"))
+    if args.deep and shutil_which("pacman"):
+        proc = subprocess.run(["pacman", "-Qkk"], capture_output=True, text=True)
+        bad = [l for l in (proc.stdout or "").splitlines() if "total modified files" in l or "error" in l.lower()]
+        print("pacman -Qkk: %d line(s) of complaints" % len(bad))
+        for line in bad[:10]:
+            print("  " + line[:160])
+    if args.apps:
+        reply2 = call({"cmd": "search", "q": "", "limit": 2000})
+        installed = installed_ids()
+        broken = []
+        for entry in reply2.get("results", []):
+            if entry["id"] not in installed:
+                continue
+            probe = entry.get("provider") or entry["id"]
+            if shutil_which(probe) or os.path.isdir("/usr/share/applications/%s.desktop" % probe) \
+                    or os.path.isdir(os.path.expanduser("~/.local/share/flatpak/app/%s" % entry.get("provider", ""))):
+                continue
+            if entry.get("source") in ("appimage", "aur", "hedron", "flatpak"):
+                continue
+            broken.append(entry["id"])
+        print("apps whose advertised command is missing: %s" % (", ".join(broken) or "none"))
+    return 0 if ok else 1
+
+
+def cmd_seed(args: argparse.Namespace) -> int:
+    """Build the index from the shipped catalogue (used by the ISO and by `--offline`)."""
+    store = local()
+    import hedrostd  # type: ignore
+
+    from hedronlib.catalog import Catalog
+    from hedronlib import storeindex
+
+    data_dir = os.environ.get("HEDRON_DATA_DIR") or "/etc/hedron"
+    apps = os.path.join(data_dir, "apps.toml")
+    if not os.path.isfile(apps):
+        print("hstore: no catalogue at %s" % apps, file=sys.stderr)
+        return 1
+    cat = Catalog.load(apps)
+    doc = storeindex.from_catalog(cat, version=store.cfg.get("version", "0"), mirror=store.cfg["mirror"],
+                                   profiles={p: cat.default_selection(p) for p in
+                                             ("gamerte", "desktop", "handheld", "studio", "core")})
+    out = store.cfg["index"]
+    key = os.environ.get("HEDRON_STORE_KEY")
+    storeindex.write(doc, out, sign_key=key if key and os.path.isfile(key) else None)
+    print("wrote %s (%d entries%s)" % (out, len(doc["entries"]), ", signed" if key else ", unsigned"))
+    return 0 if store.index or True else 1
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    """Open the QML store window; degrade to the TUI listing instead of failing."""
+    qml = os.path.join(os.path.dirname(_HERE), "share", "hedron", "store", "Store.qml")
+    if not os.path.isfile(qml):
+        qml = "/usr/share/hedron/store/Store.qml"
+    for viewer in ("qml", "qmlscene", "kyototycoon"):
+        if shutil_which(viewer) and os.path.isfile(qml) and not args.tui:
+            return subprocess.call([viewer, qml])
+    print("hstore: no QML viewer available (%s) — falling back to the terminal store"
+          % "qml/qmlscene" if not args.tui else "as requested")
+    return cmd_list(argparse.Namespace(category=None, source=None, tier=None, json=False,
+                                      installed_only=False, limit=200))
+
+
+def cmd_categories(args: argparse.Namespace) -> int:
+    reply = call({"cmd": "status"})
+    from collections import Counter
+
+    counts = Counter()
+    search = call({"cmd": "search", "q": "", "limit": 2000})
+    for entry in search.get("results", []):
+        counts[entry.get("category", "?")] += 1
+    rows = [[cat, n] for cat, n in sorted(counts.items())]
+    print(table(rows, headers=["category", "apps"]))
+    print("\ntotal %d" % sum(counts.values()))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hstore", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--require-daemon", action="store_true", help="refuse to do work in-process")
+    # --json is a *subcommand* flag (via parents) so `hstore search foo --json` works the way
+    # every other tool in this distro behaves; the top level keeps it too for `hstore --json`.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd")
+
+    p = sub.add_parser("search", parents=[common])
+    p.add_argument("query", nargs="*")
+    p.add_argument("--category")
+    p.add_argument("--source", choices=["pacman", "flatpak", "appimage", "aur", "hedron"])
+    p.add_argument("--tier", choices=["verified", "community", "unsupported"])
+    p.add_argument("--limit", type=int, default=60)
+    p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("list", parents=[common])
+    p.add_argument("--category")
+    p.add_argument("--source")
+    p.add_argument("--tier")
+    p.add_argument("--installed-only", action="store_true")
+    p.add_argument("--gui", action="store_true")
+    p.add_argument("--limit", type=int, default=500)
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("info", parents=[common])
+    p.add_argument("app")
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("categories", parents=[common])
+    p.set_defaults(func=cmd_categories)
+
+    for verb, func in (("plan", cmd_plan), ("install", cmd_install), ("remove", cmd_remove)):
+        p = sub.add_parser(verb, parents=[common])
+        p.add_argument("app", nargs="*")
+        p.add_argument("--all", action="store_true")
+        p.add_argument("--dry-run", action="store_true")
+        p.add_argument("--yes", "-y", action="store_true")
+        if verb == "install":
+            p.add_argument("--from-selection", action="store_true")
+            p.add_argument("--token", default=None)
+            p.add_argument("--enable-units", action="store_true")
+        p.set_defaults(func=func)
+
+    p = sub.add_parser("update", parents=[common])
+    p.add_argument("--index", action="store_true", help="only refresh the app index")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--yes", "-y", action="store_true")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("undo", parents=[common])
+    p.add_argument("token", nargs="?", default=None)
+    p.add_argument("--plan-only", action="store_true")
+    p.set_defaults(func=cmd_undo)
+
+    sub.add_parser("status", parents=[common]).set_defaults(func=cmd_status)
+    p = sub.add_parser("stats", parents=[common])
+    p.add_argument("--oneline", action="store_true")
+    p.set_defaults(func=cmd_stats)
+    p = sub.add_parser("journal", parents=[common])
+    p.add_argument("-n", "--limit", type=int, default=25)
+    p.set_defaults(func=cmd_journal)
+    p = sub.add_parser("check-selection", parents=[common])
+    p.add_argument("--selection", default=SELECTION)
+    p.add_argument("--quiet", action="store_true")
+    p.set_defaults(func=cmd_check_selection)
+    p = sub.add_parser("verify", parents=[common])
+    p.add_argument("--deep", action="store_true")
+    p.add_argument("--apps", action="store_true")
+    p.set_defaults(func=cmd_verify)
+    p = sub.add_parser("seed", parents=[common])
+    p.set_defaults(func=cmd_seed)
+    p = sub.add_parser("gui", parents=[common])
+    p.add_argument("--tui", action="store_true")
+    p.set_defaults(func=cmd_gui)
+
+    args = ap.parse_args(argv)
+    if args.cmd is None:
+        return cmd_status(args)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

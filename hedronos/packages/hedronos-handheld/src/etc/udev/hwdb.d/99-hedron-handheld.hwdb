@@ -1,0 +1,35 @@
+# Handheld extra buttons → keycodes HedronOS binds (guide → overlay, QAM → the quick menu).
+#
+# Written as an hwdb and applied by `systemd-hwdb update && udevadm trigger`, so no userspace
+# daemon has to be running at the moment you press the button — which matters because the first
+# thing you do with a handheld is press the unmapped button, before any of our session tooling
+# has started.
+#
+# EVDEV_ABSOLUTE_* lines are for the touchscreens these devices ship with; the KEY_* lines map
+# the keyboard-side shortcuts that HID-reports the controller buttons as.
+# SPDX-License-Identifier: MIT
+# Valve Steam Deck (Galileo / Jupiter)
+evdev:input:b0003v28C0p1208*
+ KEYBOARD_KEY_130=compose
+ KEYBOARD_KEY_131=capslock
+evdev:input:b0003v28C0p12A7*
+ KEYBOARD_KEY_130=compose
+evdev:input:b0003v28C0p12FE*
+ KEYBOARD_KEY_130=compose
+ KEYBOARD_KEY_13f=kpenter
+
+# Valve's dock
+evdev:input:b0003v28C0p12FF*
+ KEYBOARD_KEY_72000e9=prog1
+
+# AYANEO / GPD / OneXPlayer: the "guide" key these ship as, mapped to our overlay toggle
+evdev:input:b0003v2861p5092*
+ KEYBOARD_KEY_130=compose
+evdev:input:b0003v045Ep0D5D*
+ KEYBOARD_KEY_130=compose
+evdev:input:b0003v1A40p0102*
+ KEYBOARD_KEY_130=compose
+
+# Touchscreen aspect/orientation hints for the 16:10 panels common on handhelds
+evdev:input:b0003v06CBp2BEC*
+ EVDEV_ABSOLUTE_0036=@f0x0f001@f0x0f001

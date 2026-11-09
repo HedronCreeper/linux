@@ -1,0 +1,117 @@
+{
+  "SPDX-License-Identifier": "MIT",
+  "$schema": "https://hedronos.local/schema/features-1.json",
+  "format": "hedron-features-1",
+  "version": "1.0.0",
+  "note": "The advertised feature registry. hedronctl features prints this, hedron-doctor checks each one against the live system, and hedronos-verify fails a build that ships a feature whose implementing package is absent. `probe` is a command that must exit 0 for the feature to be reported as active.",
+  "features": [
+    {
+      "id": "gpu-first-install",
+      "name": "GPU-aware installation",
+      "package": "hedronos-drivers",
+      "enabled": true,
+      "stage": "installer",
+      "probe": "test -f /etc/hedron/gpu-db.json && command -v hedron-gpu-detect",
+      "summary": "The installer reads PCI IDs, resolves the exact driver branch (NVIDIA open vs proprietary, amdgpu vs radeon legacy, i915 vs xe) and stages those packages into the target system before first boot \u2014 no post-install driver hunt."
+    },
+    {
+      "id": "offline-driver-cache",
+      "name": "Zero-network graphics bring-up",
+      "package": "hedronos-drivers",
+      "enabled": true,
+      "stage": "iso",
+      "probe": "test -d /var/cache/hedron/drivers",
+      "summary": "Driver packages for every plan in the build are prefetched into the ISO and served from a local repo, so a machine with no cable and no Wi-Fi still gets Vulkan."
+    },
+    {
+      "id": "flowstate",
+      "name": "FlowState transactional profiles",
+      "package": "hedronos-tune",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "test -d /etc/hedron/flowstate.d && systemctl is-enabled hedron-flowstate.service",
+      "summary": "Whole-system tuning states (gaming, studio, battery, silence, handheld) applied as one reversible transaction and switched automatically when a game takes the screen."
+    },
+    {
+      "id": "hedron-scheduler",
+      "name": "scx_hedron sched_ext scheduler",
+      "package": "linux-hedron",
+      "enabled": true,
+      "stage": "kernel",
+      "probe": "test -f /sys/module/hedron_sched/parameters/mode || test -x /usr/lib/hedron/scx/scx_hedron",
+      "summary": "A BPF scheduler shipped with the distro kernel, prioritising the foreground render thread and pinning compositor work, switchable at runtime with no reboot."
+    },
+    {
+      "id": "gamemode",
+      "name": "GameMode daemon and launcher",
+      "package": "hedronos-gamemode",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "command -v hedron-run && command -v hgm",
+      "summary": "Per-process game claims: RT limits, IRQ affinity, I/O priority, scheduler hints, game cgroup, all released on exit even if the game crashes."
+    },
+    {
+      "id": "instant-replay",
+      "name": "Rolling NVENC replay buffer",
+      "package": "hedronos-capture",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "command -v hedron-replay && systemctl --user is-enabled hedron-replayd.service",
+      "summary": "The last 60 seconds are always on disk in a ring buffer, so a clip is saved after the highlight happened, not before."
+    },
+    {
+      "id": "app-chooser",
+      "name": "Pre-install app chooser",
+      "package": "hedronos-firstsetup",
+      "enabled": true,
+      "stage": "installer",
+      "probe": "test -x /usr/bin/hedron-setup && test -f /etc/hedron/apps.toml",
+      "summary": "The first screen after booting the installer is a category browser of common apps with Steam pre-selected and locked; the selection is applied during install."
+    },
+    {
+      "id": "one-store",
+      "name": "Unified app store (pacman + Flatpak + AppImage + AUR)",
+      "package": "hedronos-store",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "command -v hstore && test -f /etc/hedron/store.toml",
+      "summary": "One signed index, four backends, one transaction that can be reverted, plus the same catalogue the installer showed you."
+    },
+    {
+      "id": "vitals-overlay",
+      "name": "Frame-time overlay and vitals",
+      "package": "hedronos-vitals",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "command -v hedron-vitals && test -f /usr/lib/hedron/overlay/hedron-vitals.qml",
+      "summary": "Compositor-side frame time, temperatures and fan curves with an in-game HUD that costs under 0.2 ms to draw."
+    },
+    {
+      "id": "handheld-mode",
+      "name": "Handheld session",
+      "package": "hedronos-handheld",
+      "enabled": true,
+      "stage": "session",
+      "probe": "test -f /usr/share/wayland-sessions/hedron-deck.desktop",
+      "summary": "Gamepad-navigable gamescope session with power caps, suspend-on-lid-tap and button remapping, auto-selected when the chassis is a handheld."
+    },
+    {
+      "id": "rollback",
+      "name": "Transactional rollback snapshots",
+      "package": "hedronos-release",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "command -v hedron-rollback",
+      "summary": "Every driver or profile change takes a snapshot; boot into the previous state from the bootloader menu if an update ruins the machine."
+    },
+    {
+      "id": "self-doctor",
+      "name": "Self-checking support tooling",
+      "package": "hedronos-doctor",
+      "enabled": true,
+      "stage": "runtime",
+      "probe": "command -v hedron-doctor",
+      "summary": "`hedron-doctor` compares what the ISO promised against what the running system is doing, and writes a redacted bundle for support."
+    }
+  ]
+}

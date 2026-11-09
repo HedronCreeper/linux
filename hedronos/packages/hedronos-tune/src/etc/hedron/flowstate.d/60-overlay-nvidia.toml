@@ -1,0 +1,24 @@
+# FlowState overlay: NVIDIA hardware.  SPDX-License-Identifier: MIT
+overlay = true
+
+[gpu]
+# The open kernel module (Turing+) exposes persistence mode via nvidia-smi rather than
+# sysfs; `waitvsync_policy` and `power_profile` map to nvidia-settings attributes below.
+power_profile = "PreferMaxPerformance"
+waitvsync_policy = 0
+
+[extra]
+persistence = { mode = "command", command = "nvidia-smi -pm 1 || true" }
+"clock-lock" = { mode = "command", command = "test \"$HEDRON_LOCK_CLOCKS\" = 1 && nvidia-smi -lgc 0,2100 || true" }
+suspend-fix = { mode = "command", command = "test -f /usr/lib/systemd/system-sleep/nvidia && echo ok || true" }
+
+[sysctl]
+# NVIDIA's driver allocates a lot of pinned pages; keep the kernel from thrashing.
+"vm.max_map_count" = 131072
+
+[env]
+# Explicitly enable the framebuffer-only path we configured in the driver plan.
+__NV_PRIME_RENDER_OFFLOAD = "0"
+__GLX_VENDOR_LIBRARY_NAME = "nvidia"
+LIBVA_DRIVER_NAME = "nvidia"
+NVIDIA_DISABLE_REQUIRE = "1"

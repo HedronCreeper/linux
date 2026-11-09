@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=HedronOS Handheld
+GenericName=Handheld controls
+Comment=Power mode, TDP and brightness for Deck-like machines
+Exec=sh -c 'hedron-handheld modes; echo; read -rp "mode? " m; [ -n "$m" ] && hedron-handheld mode "$m"; sleep 4'
+Terminal=true
+Icon=preferences-system-power
+Categories=System;Settings;Qt;
+Keywords=handheld;deck;tdp;power;brightness;gamescope;
+StartupNotify=false

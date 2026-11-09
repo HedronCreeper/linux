@@ -1,0 +1,18 @@
+# FlowState overlay: handheld-class hardware (Deck/ROG/Legion Go style).
+# SPDX-License-Identifier: MIT
+overlay = true
+
+[gpu]
+power_cap = "15000000"
+
+[sysctl]
+"vm.watermark_boost_factor" = 0
+"vm.stat_interval" = 30
+
+[extra]
+"tap-to-sleep" = { mode = "skip", command = "the power button suspends in 1.5 s and force-reboots in 10 s (systemd handle-power-key)" }
+
+[env]
+HEDRON_HANDHELD = "1"
+GAMESCOPE_LIMIT_POWER = "15"
+MANGOHUD_CONFIG = "font_size=22,background_alpha=0.4,fcat=2,vsync=1"

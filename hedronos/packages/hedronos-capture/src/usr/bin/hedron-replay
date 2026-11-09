@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# hedron-replay — save the moment that already happened.  SPDX-License-Identifier: MIT
+#
+#   hedron-replay save              hardlink the whole ring into ~/Videos/HedronOS (no re-encode)
+#   hedron-replay save --last 30    only the last 30 seconds
+#   hedron-replay start|stop|status the ring buffer itself
+#   hedron-replay mark              remember this instant, then save around it later
+#   hedron-replay trim file.mkv 12 45   cut a range out of an existing clip
+set -euo pipefail
+
+public_usage() {
+	# The header comment is the manual page, so `--help` prints the header: the two can
+	# then never disagree, and the range cannot go stale when the header gains a line.
+	awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
+}
+
+
+# Answer `--help` from this script's own header comment: the header is where the verbs are
+# documented, so the help text is the same text a reader of the file sees and cannot drift.
+case "${1:-}" in
+-h | --help | help)
+	public_usage
+	exit 0
+	;;
+esac
+RING=${HEDRON_REPLAY_RING:-$HOME/.cache/hedron/replay}
+OUT=${HEDRON_REPLAY_OUT:-$HOME/Videos/HedronOS}
+STATE=${HEDRON_REPLAY_STATE:-/run/hedron/replay.json}
+MARK=$HOME/.cache/hedron/replay/marked
+
+seg_files() {
+	find "$RING" -maxdepth 1 -name 'seg-*.mkv' -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-
+}
+
+cmd=${1:-save}
+shift || true
+
+case "$cmd" in
+save)
+	last=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--last)
+			last=$2
+			shift 2
+			;;
+		--out)
+			OUT=$2
+			shift 2
+			;;
+		*)
+			echo "hedron-replay: unknown option $1" >&2
+			exit 2
+			;;
+		esac
+	done
+	mapfile -t segs < <(seg_files)
+	[ ${#segs[@]} -gt 0 ] || {
+		echo "hedron-replay: the ring is empty — is hedron-replayd running? (hedron-replay status)" >&2
+		exit 1
+	}
+	if [ "$last" -gt 0 ] && [ ${#segs[@]} -gt 1 ]; then
+		# Keep the newest segments whose combined duration covers `last` seconds.
+		keep=$((last / 10 + 2))
+		[ "$keep" -lt ${#segs[@]} ] && segs=("${segs[@]: -$keep}")
+	fi
+	stamp=$(date +%Y%m%d-%H%M%S)
+	mkdir -p "$OUT"
+	if [ ${#segs[@]} -eq 1 ]; then
+		dest="$OUT/hedron-$stamp.mkv"
+		ln -f "${segs[0]}" "$dest" 2>/dev/null || cp "${segs[0]}" "$dest"
+		echo "saved ${dest}"
+		exit 0
+	fi
+	list=$(mktemp)
+	for s in "${segs[@]}"; do printf "file '%s'\n" "$s" >"$list"; done
+	dest="$OUT/hedron-$stamp.mkv"
+	# concat demuxer + stream copy: this is a container operation, so it is instant and
+	# lossless. Re-encoding someone's highlight to "merge" it would be criminal.
+	if ffmpeg -hide_banner -loglevel error -f concat -safe 0 -i "$list" -c copy "$dest"; then
+		echo "saved ${dest} (${#segs[@]} segment(s), $(du -h "$dest" | cut -f1))"
+	else
+		echo "hedron-replay: ffmpeg concat failed; the segments are still in $RING" >&2
+		rm -f "$list"
+		exit 1
+	fi
+	rm -f "$list"
+	;;
+mark)
+	mkdir -p "$RING"
+	date +%s >"$MARK"
+	echo "marked $(date +%H:%M:%S) — run 'hedron-replay save --around' within $((${RING_AGE:-60}))s"
+	;;
+save-around)
+	[ -f "$MARK" ] || {
+		echo "hedron-replay: nothing marked (use 'hedron-replay mark' first)" >&2
+		exit 1
+	}
+	marked=$(cat "$MARK")
+	now=$(date +%s)
+	window=$((now - marked + 15))
+	[ "$window" -gt 180 ] && window=180
+	"$0" save --last "$window" && rm -f "$MARK"
+	;;
+start)
+	if [ -d /run/systemd/system ]; then
+		systemctl --user start hedron-replayd.service
+	else
+		setsid "${HEDRON_LIBEXEC:-/usr/lib/hedron}/hedron-replayd.py" &
+		echo "started without systemd (pid $!)"
+	fi
+	;;
+stop)
+	if [ -d /run/systemd/system ]; then
+		systemctl --user stop hedron-replayd.service
+	else
+		pkill -f hedron-replayd.py || true
+	fi
+	echo "replay ring stopped (existing segments left in $RING)"
+	;;
+status)
+	if [ -r "$STATE" ]; then
+		python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("state:",d.get("state")); print("encoder:",d.get("encoder","-")); print("ring:",d.get("ring","-")); print("segments:",d.get("segments","?")); print("bytes:",d.get("ring_bytes","?"))' "$STATE"
+	else
+		echo "hedron-replayd is not running (no $STATE)"
+	fi
+	echo "ring contents: $(find "$RING" -name 'seg-*.mkv' 2>/dev/null | wc -l) segment(s), $(du -sh "$RING" 2>/dev/null | cut -f1)"
+	;;
+trim)
+	[ $# -ge 3 ] || {
+		echo "usage: hedron-replay trim FILE START DURATION" >&2
+		exit 2
+	}
+	src=$1
+	start=$2
+	dur=$3
+	[ -f "$src" ] || {
+		echo "no such file: $src" >&2
+		exit 1
+	}
+	out=${src%.mkv}-clip.mkv
+	ffmpeg -hide_banner -loglevel error -ss "$start" -i "$src" -t "$dur" -c copy "$out"
+	echo "wrote $out"
+	;;
+*)
+	echo "usage: hedron-replay save [--last SECONDS] | mark | save-around | start | stop | status | trim FILE START DUR" >&2
+	exit 2
+	;;
+esac

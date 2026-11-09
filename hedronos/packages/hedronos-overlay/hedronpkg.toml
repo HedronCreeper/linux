@@ -1,0 +1,31 @@
+# hedronos-overlay — HUD presets and the loader glue.  SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-overlay"
+version = "1.0.0"
+release = "1"
+summary = "Overlay presets (competitive/streamer/minimal/handheld) with per-app overrides"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["bash", "coreutils", "findutils"]
+optional = ["mangohud", "gamescope"]
+
+[provides]
+packages = ["hedronos-hud"]
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hedron-overlay" = "0755"
+"etc/hedron/overlay.d/00-base.conf" = "0644"
+"etc/hedron/overlay.d/competitive.conf" = "0644"
+"etc/hedron/overlay.d/streamer.conf" = "0644"
+"etc/hedron/overlay.d/minimal.conf" = "0644"
+"etc/hedron/overlay.d/handheld.conf" = "0644"
+
+[files]
+preserve = ["/etc/hedron/overlay.d/competitive.conf"]

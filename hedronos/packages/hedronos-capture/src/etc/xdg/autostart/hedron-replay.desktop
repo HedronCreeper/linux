@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=HedronOS Instant Replay
+Comment=Keeps the last 60 seconds of gameplay ready to save
+Exec=/usr/bin/hedron-replay start
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=2
+X-systemd-skip=false

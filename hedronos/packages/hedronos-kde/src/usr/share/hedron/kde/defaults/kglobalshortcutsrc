@@ -1,0 +1,14 @@
+# KDE-level shortcuts that are *not* compositor shortcuts (those live in the hedron-keys KWin
+# script, so they work on a VT/other compositor too). Kept short on purpose: the distro already
+# ships keys for the vitals HUD, replay and game lock; this file only adds the two things people
+# ask a desktop for.
+[kwin]
+Show Desktop Grid=Ctrl+F3,none,Show Desktop Grid
+Cascade Desktop Window Type=none,none,Cascade Desktop Window Type
+
+[plasmashell]
+activate task manager entry 1=Meta+1,none,Activate Task Manager Entry 1
+manage activities=Meta+Q,none,Manage Activities
+
+[kscreenlocker]
+lockScreen=Meta+L,none,Lock Session

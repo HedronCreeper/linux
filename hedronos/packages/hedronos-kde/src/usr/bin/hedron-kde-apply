@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""hedron-kde-apply — put HedronOS's KDE defaults into your own config, reversibly.
+
+Why not drop files into /etc/skel or /usr/share/kconfig: both are wrong. /etc/skel only affects
+new users (so an update never reaches existing ones) and system defaults are invisible to
+"Revert to defaults" in System Settings, which teaches people that the distro is fighting them.
+
+So we merge into ~/.config, keep a timestamped backup of every file we touched under
+~/.config/hedron/kde-backup/, and can print the diff (--check) or undo it (--revert). Merging is
+per key, never per file: your own kwinrc tweaks survive.
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import difflib
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages",):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+
+DEFAULTS = os.environ.get("HEDRON_KDE_DEFAULTS", "/usr/share/hedron/kde/defaults")
+BRANDING = "/usr/share/hedron/branding/branding.json"
+SCRIPTS = ("hedron-vitals", "hedron-keys")
+MANAGED = "# managed by hedron-kde-apply (harmless to edit; --check will report it)"
+
+
+def config_dir() -> str:
+    return os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+
+
+def read_ini(path: str) -> configparser.RawConfigParser:
+    # raw=True everywhere: KDE values contain % and other characters ConfigParser would try to
+    # interpolate, and silently mangling a font string is the kind of bug you only see at login.
+    cp = configparser.RawConfigParser(strict=False, interpolation=None)
+    if os.path.isfile(path):
+        try:
+            cp.read(path, encoding="utf-8")
+        except configparser.Error as exc:
+            print("  ! %s is not readable as INI (%s) — leaving it untouched" % (path, exc))
+    return cp
+
+
+def render_ini(cp: configparser.RawConfigParser) -> str:
+    out = []
+    for section in cp.sections():
+        out.append("[%s]" % section)
+        for key, value in cp.items(section, raw=True):
+            out.append("%s=%s" % (key, value))
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def merge(src: str, dst: str, *, dry: bool, overwrite: bool) -> list[str]:
+    """Return the list of keys we changed (empty means already in sync)."""
+    incoming = read_ini(src)
+    current = read_ini(dst)
+    changed: list[str] = []
+    for section in incoming.sections():
+        for key, value in incoming.items(section, raw=True):
+            have = current.get(section, key, fallback=None) if current.has_section(section) else None
+            if have == value or (have is not None and not overwrite):
+                continue
+            if not current.has_section(section):
+                current.add_section(section)
+            current.set(section, key, value)
+            changed.append("%s/%s" % (section, key))
+    if changed and not dry:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.isfile(dst):
+            backup(dst)
+        with open(dst, "w", encoding="utf-8") as fh:
+            fh.write(render_ini(current))
+    return changed
+
+
+def backup(path: str) -> str:
+    root = os.path.join(config_dir(), "hedron", "kde-backup", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(root, exist_ok=True)
+    shutil.copy2(path, os.path.join(root, os.path.basename(path)))
+    return root
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    if not os.path.isdir(DEFAULTS):
+        print("hedron-kde-apply: no defaults at %s" % DEFAULTS, file=sys.stderr)
+        return 1
+    dest = config_dir()
+    total = 0
+    for name in sorted(os.listdir(DEFAULTS)):
+        if not name.endswith(("rc", "globals", "src")) and not name.endswith(".conf"):
+            continue
+        src = os.path.join(DEFAULTS, name)
+        dst = os.path.join(dest, name)
+        changed = merge(src, dst, dry=args.dry_run, overwrite=not args.keep_mine)
+        total += len(changed)
+        print("%-22s %s" % (name, ("%d key(s) written" % len(changed)) if changed
+                            else ("up to date" if os.path.isfile(dst) else "would create")))
+        for key in changed if args.verbose else []:
+            print("    " + key)
+    print("\n%d key(s) %s" % (total, "planned" if args.dry_run else "written"))
+    if total and not args.dry_run:
+        print("re-run with --check to verify, or --revert to undo (a backup was taken)")
+    return 0 if args.script else apply_scripts(args)
+
+
+def apply_scripts(args: argparse.Namespace) -> int:
+    """Load the KWin scripts through D-Bus, using whatever methods this KWin actually exports.
+
+    The scripting D-Bus API has moved twice in KWin's history (loadScript → startScriptForFile →
+    a second interface), and this file is read at every login, so we introspect instead of
+    hardcoding a call that would break on the next Plasma update.
+    """
+    if args.dry_run or shutil.which("qdbus") is None:
+        if shutil.which("qdbus") is None:
+            print("qdbus absent: enable the scripts in System Settings → Window Management → KWin Scripts")
+        return 0
+    try:
+        props = subprocess.run(["qdbus", "org.kde.KWin", "/Scripting"], capture_output=True, text=True)
+    except OSError:
+        return 0
+    methods = (props.stdout or "").splitlines()
+    for script in SCRIPTS:
+        main = "/usr/share/kwin/scripts/%s/main.js" % script
+        if not os.path.isfile(main):
+            print("%s: not installed (%s)" % (script, main))
+            continue
+        call = None
+        for candidate in ("startScriptForFile", "loadScript", "startScript"):
+            if any(candidate in m for m in methods):
+                call = candidate
+                break
+        if call is None:
+            print("%s: KWin advertises no script-loading method on /Scripting (%d methods) — "
+                  "use System Settings to enable it" % (script, len(methods)))
+            continue
+        proc = subprocess.run(["qdbus", "org.kde.KWin", "/Scripting", call, main], capture_output=True,
+                              text=True)
+        state = "loaded" if proc.returncode == 0 else "failed (%s)" % (proc.stderr or "").strip()[:70]
+        print("%s: %s via %s" % (script, state, call))
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    drift = 0
+    for name in sorted(os.listdir(DEFAULTS)) if os.path.isdir(DEFAULTS) else []:
+        src = os.path.join(DEFAULTS, name)
+        dst = os.path.join(config_dir(), name)
+        if not os.path.isfile(src):
+            continue
+        if not os.path.isfile(dst):
+            print("%s: MISSING (run hedron-kde-apply)" % name)
+            drift += 1
+            continue
+        want = read_ini(src)
+        have = read_ini(dst)
+        missing = []
+        for section in want.sections():
+            for key, value in want.items(section, raw=True):
+                if have.get(section, key, fallback=None) != value:
+                    missing.append("%s/%s (want %r, have %r)" % (section, key, value,
+                                                                  have.get(section, key, fallback=None)))
+        if missing:
+            print("%s: %d key(s) differ from the distro default" % (name, len(missing)))
+            for line in missing if args.verbose else missing[:8]:
+                print("    " + line)
+            drift += 1
+    print("check: %s" % ("in sync" if not drift else "%d file(s) need attention" % drift))
+    return 0 if not drift else 1
+
+
+def cmd_revert(args: argparse.Namespace) -> int:
+    root = os.path.join(config_dir(), "hedron", "kde-backup")
+    if not os.path.isdir(root):
+        print("no backups under %s" % root)
+        return 1
+    stamps = sorted(os.listdir(root))
+    which = args.stamp or stamps[-1]
+    src = os.path.join(root, which)
+    if not os.path.isdir(src):
+        print("no backup named %s (have: %s)" % (which, ", ".join(stamps[-5:])))
+        return 2
+    for name in sorted(os.listdir(src)):
+        dst = os.path.join(config_dir(), name)
+        if args.dry_run:
+            print("would restore %s → %s" % (os.path.join(src, name), dst))
+            continue
+        shutil.copy2(os.path.join(src, name), dst)
+        print("restored " + name)
+    print("reverted to %s" % which)
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    print("defaults dir   %s" % DEFAULTS)
+    print("config dir     %s" % config_dir())
+    print("colour scheme  %s" % (os.path.exists("/usr/share/color-schemes/HedronOS.colors")
+                                 and "HedronOS (installed)" or "not installed"))
+    for name in sorted(os.listdir(DEFAULTS)) if os.path.isdir(DEFAULTS) else []:
+        dst = os.path.join(config_dir(), name)
+        print("%-22s %s" % (name, "applied" if os.path.isfile(dst) else "not applied"))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-kde-apply", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--dry-run", action="store_true")
+    common.add_argument("--verbose", "-v", action="store_true")
+    common.add_argument("--keep-mine", action="store_true", help="do not overwrite keys you already set")
+    common.add_argument("--script", nargs="+", default=None, help="load only these KWin scripts")
+    # Accepted before the verb too (hidden), so both `hedron-kde-apply --dry-run apply` and the
+    # usual `... apply --dry-run` work.
+    ap.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--verbose", "-v", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--keep-mine", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--script", nargs="+", default=None, help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("apply", parents=[common], help="merge the defaults into ~/.config")
+    sub.add_parser("check", parents=[common], help="report drift from the distro defaults")
+    sub.add_parser("status", parents=[common], help="what is applied and what is not")
+    p = sub.add_parser("revert", parents=[common], help="restore the last backup")
+    p.add_argument("--stamp", default=None)
+    args = ap.parse_args(argv)
+    args.verbose = args.verbose or bool(getattr(args, "stamp", None))
+    if args.cmd in (None, "apply"):
+        return cmd_apply(args)
+    if args.cmd == "check":
+        return cmd_check(args)
+    if args.cmd == "status":
+        return cmd_status(args)
+    if args.cmd == "revert":
+        return cmd_revert(args)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,40 @@
+#!/bin/bash
+# mkinitcpio install hook: put the GPU driver and the HedronOS state into the initramfs.
+# SPDX-License-Identifier: MIT
+#
+# Why a hook at all: with an encrypted or btrfs-on-multipath root, the first frame you draw is
+# after the root mounts, so `plymouth` and the driver's own early error messages happen on a
+# different console than the one you are looking at. Building amdgpu/i915/nvidia into the image
+# makes the boot story linear — one splash, one log, from power button to desktop.
+
+build() {
+    local mod
+    add_module "drm"
+    add_module "drm_kms_helper"
+    # The vendor module the drivers package picked for *this* machine, if it recorded one.
+    if [ -r /etc/hedron/initramfs-modules ]; then
+        while read -r mod; do
+            [ -n "$mod" ] || continue
+            [ -d "/sys/module/$mod" ] || module_exists "$mod" || continue
+            add_module "$mod"
+            add_module "$mod" 2>/dev/null || true
+        done < /etc/hedron/initramfs-modules
+    fi
+    for mod in amdgpu i915 nouveau nvidia nvidia-drm; do
+        module_exists "$mod" && add_module "$mod"
+    done
+    add_binary /usr/bin/hedron-gpu-detect
+    add_binary /usr/bin/hedron-drivers
+    add_file /etc/hedron/gpu-db.json
+    add_file /etc/hedron/gpu-plans.json
+    add_file /etc/hedron/driver-rules.toml
+    add_runscript
+    add_checksum
+}
+
+help() {
+    cat <<HELPEOF
+  hedron-early: loads the GPU driver chosen by hedron-drivers from inside the initramfs, and
+  keeps the boot splash and the boot log on the same console.
+HELPEOF
+}

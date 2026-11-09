@@ -1,0 +1,4 @@
+HedronOS 1.0.0 "Halcyon" — \n\n  hedronctl status        what the machine is doing
+  hedron-doctor           why it is not doing it
+  hstore list             what you can install
+  Log in with the user you created during install.

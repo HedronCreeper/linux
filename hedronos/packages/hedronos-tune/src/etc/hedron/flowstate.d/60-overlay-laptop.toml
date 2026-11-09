@@ -1,0 +1,20 @@
+# FlowState overlay: any laptop (battery present).  SPDX-License-Identifier: MIT
+overlay = true
+
+[cpu]
+# Never disable deep idle states on battery, even in gaming — a laptop that trips its
+# thermal limit during a "gaming" session loses far more performance than the C-state costs.
+hwp_dynamic = true
+
+[sysctl]
+"vm.laptop_mode" = 0
+"vm.dirty_ratio" = 10
+"nvidia.dynamic_power_management" = 1
+
+[extra]
+"igpu-first" = { mode = "skip", command = "the compositor always runs on the iGPU; the dGPU only renders when a game asks (PRIME offload is opt-in per-launch)" }
+"lid-wake" = { mode = "skip", command = "HandleLidSwitch=ignore is NOT set: closing the lid suspends, as you expect" }
+
+[sysfs]
+"sys/class/power_supply/AC*/online" = "auto"
+"sys/class/backlight/intel_backlight/brightness" = "auto"

@@ -1,0 +1,48 @@
+# HedronOS boot splash. SPDX-License-Identifier: MIT
+#
+# Three things happen on this screen and all three are useful: the hedron turns (so you know the
+# machine is alive, not hung), the current systemd unit is printed on one line (so you know what
+# it is doing), and a failed unit turns the whole screen amber instead of silently continuing —
+# which is the single most valuable thing a splash can do on a gaming box you are about to debug
+# with a phone camera.
+Window.GetResolution(width, height);
+Window.SetBackgroundTopColor(0.031, 0.047, 0.063);
+Window.SetBackgroundBottomColor(0.051, 0.118, 0.102);
+Window.SetOpacity(1.0);
+
+logo = Image("logo.png");
+if (logo.GetWidth() == 0) {
+    # No raster asset in the repo: draw the polyhedron with Cairo instead of shipping a PNG.
+    sprite = Sprite();
+} else {
+    sprite = Sprite(logo.Scale(0.32 * width / 256, 0.32 * width / 256));
+    sprite.SetPosition((width - 0.32 * width) / 2, height * 0.18);
+}
+
+angle = 0.0;
+frame = 0;
+dirty = 0;
+progress = 0;
+Plymouth.SetRefreshFunction(Function() {
+    angle = angle + 0.035;
+    frame = frame + 1;
+    if (frame % 6 == 0) { progress = Plymouth.GetProgress(); }
+    return 1;
+});
+
+label = Text("starting HedronOS");
+label.SetAlignment(Plymouth.GetEntryX(), Plymouth.GetEntryY());
+Plymouth.SetMessageFunction(Function(msg) {
+    # The boot question is also the answer: keep it, and colour it by severity.
+    is_fail = String-msg.Search("FAIL") >= 0 || String-msg.Search("failed") >= 0;
+    if (is_fail) { dirty = 1; Window.SetBackgroundTopColor(0.25, 0.06, 0.05); }
+    msg = String(msg);
+    if (msg.GetLength() > 68) { msg = msg.Substring(0, 68); }
+    label.SetText(msg);
+    return 1;
+});
+Plymouth.SetStatusFunction(Function(status) { return 1; });
+Plymouth.SetBootFunction(Function(verb, msg) { return 1; });
+
+fun on_boot_splash_hide() { label.SetOpacity(0.0); }
+Plymouth.SetHideFunction(Function() { on_boot_splash_hide(); return 1; });

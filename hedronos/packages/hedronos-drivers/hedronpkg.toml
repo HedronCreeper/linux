@@ -1,0 +1,54 @@
+# Package manifest for mkhedronpkg. SPDX-License-Identifier: MIT
+#
+# TOML note: inline tables cannot span lines, so multi-key maps live in their own
+# [section] blocks. hedronos-verify validates every hedronpkg.toml in the tree.
+[package]
+name = "hedronos-drivers"
+version = "1.0.0"
+release = "1"
+summary = "GPU detection, driver planning and one-command provisioning for HedronOS"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["python", "pciutils", "kmod", "hwdata", "sed", "grep", "initramfs-utils"]
+build = ["python"]
+check = ["python"]
+optional = ["vulkan-tools", "mesa-utils", "efivar", "corectrl"]
+
+[provides]
+packages = ["hedronos-graphics"]
+
+[conflicts]
+packages = ["mhal"]
+
+[install]
+tree = "src"
+vendored = [{ from = "hedronlib", to = "usr/lib/python3.13/site-packages/hedronlib" }]
+
+[install.modes]
+"usr/bin/hedron-gpu-detect" = "0755"
+"usr/bin/hedron-drivers" = "0755"
+"usr/lib/hedron/driverd.py" = "0755"
+"usr/lib/initcpio/install/hedronos-drivers" = "0755"
+"usr/lib/initcpio/hooks/hedronos-drivers" = "0644"
+"usr/lib/udev/rules.d/85-hedron-graphics.rules" = "0644"
+"etc/hedron/drivers.conf" = "0644"
+"etc/pacman.d/hooks/hedron-drivers.hook" = "0644"
+
+[services]
+enable = ["hedronos-drivers.service", "hedronos-driverd.socket"]
+units = ["usr/lib/systemd/system/hedronos-drivers.service",
+         "usr/lib/systemd/system/hedronos-driverd.service",
+         "usr/lib/systemd/system/hedronos-driverd.socket"]
+
+[files]
+preserve = ["/etc/hedron/drivers.local.toml", "/etc/hedron/drivers.conf"]
+
+[tests]
+modules = ["tests/test_gpu_detect.py", "tests/test_driver_engine.py", "tests/test_gpu_db.py"]
+
+[docs]
+readme = "README.md"

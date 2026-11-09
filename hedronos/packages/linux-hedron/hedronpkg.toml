@@ -1,0 +1,40 @@
+# linux-hedron — the kernel's drop-ins (the kernel itself is built from this repo's tree).
+# SPDX-License-Identifier: MIT
+[package]
+name = "linux-hedron"
+version = "1.0.0"
+release = "1"
+summary = "The HedronOS kernel: low-latency scheduling, sched_ext, and the GPU driver policy hooks"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT", "GPL-2.0"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["kmod", "mkinitcpio", "systemd-libs"]
+build = ["python", "bc", "bison", "flex", "libelf", "openssl"]
+check = ["python"]
+optional = ["linux-firmware", "dwarves"]
+
+[install]
+tree = "src"
+extra = [{ from = "PKGBUILD", to = "usr/share/doc/linux-hedron/PKGBUILD" },
+         { from = "../kernel/hedronos_defconfig", to = "usr/share/doc/linux-hedron/hedronos_defconfig" },
+         { from = "../kernel/hedronos.fragment", to = "usr/share/doc/linux-hedron/hedronos.fragment" },
+         { from = "src/usr/lib/hedron/kernel/README.md", to = "usr/share/doc/linux-hedron/README.md" }]
+
+[install.modes]
+"etc/sysctl.d/99-hedron-kernel.conf" = "0644"
+"etc/modules-load.d/hedron.conf" = "0644"
+"usr/lib/modules-load.d/hedron-kernel.conf" = "0644"
+"usr/lib/initcpio/install/hedron-early" = "0755"
+"usr/lib/initcpio/hooks/hedron-early" = "0755"
+"usr/share/hedron/kernel/linux-hedron.preset" = "0644"
+"usr/share/doc/linux-hedron/PKGBUILD" = "0644"
+
+[files]
+preserve = ["/etc/sysctl.d/99-hedron-kernel.conf", "/etc/modules-load.d/hedron.conf",
+            "/etc/mkinitcpio.d/linux-hedron.preset"]
+
+[tests]
+modules = ["tests/test_kernel_config.py"]

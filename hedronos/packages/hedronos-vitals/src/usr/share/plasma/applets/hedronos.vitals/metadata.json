@@ -1,0 +1,13 @@
+{
+  "SPDX-License-Identifier": "MIT",
+  "KPackageStructure": "Plasma/Applet",
+  "Id": "hedronos.vitals",
+  "Name": "HedronOS Vitals",
+  "Comment": "Frame time, temperatures and power from hedron-vitalsd",
+  "Icon": "hardware-monitor",
+  "EnabledByDefault": false,
+  "Version": "1.0.0",
+  "Website": "https://github.com/HedronCreeper/linux/tree/master/hedronos",
+  "License": "MIT",
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

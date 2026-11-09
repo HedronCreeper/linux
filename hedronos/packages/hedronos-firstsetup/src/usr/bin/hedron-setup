@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""hedron-setup — the app chooser the installer opens first.
+
+This is the screen the user sees before anything is written to disk: a category browser of
+~70 apps, with Steam ticked and locked (the request was explicit: Steam is always in),
+bundles like "Gaming essentials" that tick a group, a size estimate that updates live, and a
+"what will happen" panel that lists the actual commands.
+
+Two front ends, one model:
+  * `--tui` (default on a console): pure-ANSI widget set, no curses dependency, works in the
+    live ISO on a tty and over serial.
+  * `--gui`: hands off to Setup.qml (Kirigami) when a compositor is running; if the QML viewer
+    is missing it *falls back to the TUI in a terminal window* instead of failing — a broken
+    installer screen is the worst possible failure mode.
+
+Both write the same selection file, which `hedronos-install --from-selection` consumes and
+which the store later reads back to verify the promise was kept. That single file is why the
+installer, the store and hedron-doctor can never disagree about what you asked for.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages",):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(9):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+
+from hedronlib.catalog import Catalog  # noqa: E402
+from hedronlib.util import human_bytes  # noqa: E402
+
+APPS = os.environ.get("HEDRON_APPS_TOML", "/etc/hedron/apps.toml")
+SELECTION = os.environ.get("HEDRON_SELECTION", "/var/lib/hedron/selected-apps.json")
+PROFILE = os.environ.get("HEDRONOS_PROFILE", "gamerte")
+
+
+class Model:
+    """The single source of truth for what is ticked, shared by both front ends."""
+
+    def __init__(self, catalog: Catalog, profile: str = PROFILE):
+        self.catalog = catalog
+        self.profile = profile
+        self.selected: set[str] = set()
+        self.category = "all"
+        self.note = ""
+        for app_id in catalog.default_selection(profile):
+            self.selected.add(app_id)
+        for app_id in catalog.locked_ids():
+            self.selected.add(app_id)
+        self.apps = {a.id: a for a in catalog.apps.values()}
+
+    # ------------------------------------------------------------------ state
+    def visible(self) -> list:
+        apps = (self.catalog.visible() if self.category == "all"
+                else self.catalog.by_category(self.category))
+        return [a for a in apps if not a.hidden]
+
+    def categories(self) -> list[tuple[str, str, int]]:
+        """(id, name, count) for every declared category that actually has apps in it."""
+        out = [("all", "All apps", len(self.catalog.visible()))]
+        for cat in self.catalog.categories:
+            if not isinstance(cat, dict):
+                continue
+            cid = cat.get("id")
+            if not cid:
+                continue
+            count = len(self.catalog.by_category(cid))
+            if count:
+                out.append((cid, cat.get("name", cid), count))
+        return out
+
+    def toggle(self, app_id: str) -> None:
+        app = self.apps.get(app_id)
+        if app is None:
+            return
+        if app.locked:
+            self.note = "%s is part of HedronOS and cannot be unticked (it is why you installed this)" % app.name
+            return
+        if app_id in self.selected:
+            self.selected.discard(app_id)
+        else:
+            self.selected.add(app_id)
+            self.note = ""
+
+    def bundle_names(self) -> list[str]:
+        return sorted(self.catalog.bundles)
+
+    def apply_bundle(self, name: str) -> int:
+        ids = self.catalog.bundle(name)
+        added = 0
+        for app_id in ids:
+            app = self.apps.get(app_id)
+            if app is None or app.locked or getattr(app, "hidden", False):
+                continue
+            if app_id not in self.selected:
+                self.selected.add(app_id)
+                added += 1
+        self.note = "bundle %s: %d app(s) added" % (name, added) if added else "bundle %s already applied" % name
+        return added
+
+    def strip_bundle(self, name: str) -> int:
+        ids = set(self.catalog.bundle(name))
+        before = len(self.selected)
+        self.selected = {a for a in self.selected if a not in ids or self.apps[a].locked}
+        return before - len(self.selected)
+
+    def reset_to_defaults(self) -> None:
+        self.selected = set(self.catalog.default_selection(self.profile)) | set(self.catalog.locked_ids())
+        self.note = "reset to the %s defaults" % self.profile
+
+    # ------------------------------------------------------------------ numbers
+    def size_estimate(self) -> tuple[float, int]:
+        mib, count = 0.0, 0
+        for app_id in self.selected:
+            app = self.apps.get(app_id)
+            if app is None:
+                continue
+            mib += app.size_mib
+            count += 1
+        return mib, count
+
+    def expand(self) -> dict:
+        return self.catalog.expand(sorted(self.selected))
+
+    def commands(self) -> list[str]:
+        plan = self.expand()
+        cmds: list[str] = []
+        if plan["pacman"]:
+            cmds.append("pacman -S --noconfirm --needed " + " ".join(plan["pacman"]))
+        for app in plan["flatpak"]:
+            cmds.append("flatpak install -y flathub " + app)
+        for app in plan["appimage"]:
+            cmds.append("hedron-appimage install " + app)
+        for app in plan["hedron"]:
+            cmds.append("pacman -S --noconfirm --needed " + app + "   # HedronOS native")
+        if plan["unknown_refs"]:
+            cmds.append("# UNRESOLVED: " + ", ".join(plan["unknown_refs"]))
+        return cmds
+
+    # ------------------------------------------------------------------ file
+    def to_document(self) -> dict:
+        plan = self.expand()
+        return {
+            "format": "hedron-selection-1",
+            "when": int(time.time()),
+            "profile": self.profile,
+            "locked": self.catalog.locked_ids(),
+            "apps": [{"app": a, "selected": True, "name": self.apps[a].name if a in self.apps else a,
+                      "source": (self.apps[a].pacman and "pacman") or (self.apps[a].flatpak and "flatpak")
+                                or (self.apps[a].appimage and "appimage") or (self.apps[a].aur and "aur")
+                                or (self.apps[a].hedron and "hedron") or "?" if a in self.apps else "?"}
+                     for a in sorted(self.selected)],
+            "counts": {k: len(v) if isinstance(v, list) else v for k, v in plan.items()},
+            "size_mib": round(self.size_estimate()[0], 1),
+            "commands": self.commands(),
+        }
+
+    def write(self, path: str = SELECTION) -> str:
+        doc = self.to_document()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+        return path
+
+
+# --------------------------------------------------------------------------- TUI
+class Tui:
+    """Keyboard-driven chooser that needs nothing but ANSI.
+
+    Keys: ↑/↓ or j/k move · space toggles · a applies/undoes a bundle · c cycles category ·
+    Enter confirms · d defaults · q quits · ? help · / search
+    """
+
+    HELP = ("space toggle · enter confirm · c category · / search · d defaults · "
+            "a bundle · q quit")
+
+    def __init__(self, model: Model, *, out=sys.stdout):
+        self.model = model
+        self.cursor = 0
+        self.query = ""
+        self.out = out
+        self.rows: list = []
+
+    # ------------------------------------------------------------------ render
+    def filter_rows(self) -> list:
+        rows = self.model.visible()
+        if self.query:
+            needle = self.query.lower()
+            rows = [a for a in rows if needle in (a.name + " " + a.summary + " " + a.id).lower()]
+        self.rows = rows
+        return rows
+
+    def frame(self) -> str:
+        rows = self.filter_rows()
+        try:
+            size = shutil.get_terminal_size()
+            height = max(12, size.lines - 10)
+        except OSError:
+            height = 24
+        self.cursor = max(0, min(self.cursor, max(0, len(rows) - 1)))
+        top = max(0, self.cursor - height + 6)
+        window = rows[top:top + height]
+        mib, count = self.model.size_estimate()
+        head = ["\033[1m  HedronOS — choose your apps\033[0m",
+                "  profile %s · category \033[36m%s\033[0m · %d selected · ~%s%s"
+                % (self.model.profile, self.model.category, count, human_bytes(mib * 1048576),
+                   " · searching:%r" % self.query if self.query else ""),
+                ""]
+        body = []
+        for i, app in enumerate(window):
+            idx = top + i
+            marker = "▸" if idx == self.cursor else " "
+            box = "[×]" if app.id in self.model.selected else "[ ]"
+            lock = " 🔒" if app.locked else ""
+            tint = "\033[1m" if idx == self.cursor else ""
+            reset = "\033[0m" if idx == self.cursor else ""
+            line = "%s %s %s%s" % (marker, box, app.name, lock)
+            body.append("%-46s %s" % (tint + line + reset,
+                                     textwrap.shorten(app.summary, width=54, placeholder="…")))
+        if not body:
+            body = ["   (nothing matches)"]
+        footer = ["",
+                  "  \033[32m%s\033[0m" % (self.model.note or self.HELP)]
+        return "\033[H\033[2J" + "\n".join(head + body + footer) + "\n"
+
+    # ------------------------------------------------------------------ input
+    def read_key(self) -> str:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = os.read(fd, 1)
+            if ch in (b"\x1b",):
+                rest = os.read(fd, 2)
+                if rest.startswith(b"[A"):
+                    return "up"
+                if rest.startswith(b"[B"):
+                    return "down"
+                if rest.startswith(b"[C"):
+                    return "right"
+                if rest.startswith(b"[D"):
+                    return "left"
+                return "esc"
+            if ch in (b"\r", b"\n"):
+                return "enter"
+            return ch.decode("utf-8", "replace")
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    def run(self) -> int:
+        if not sys.stdin.isatty():
+            print("hedron-setup: no terminal (use --gui, --export, or --print)", file=sys.stderr)
+            return 2
+        while True:
+            sys.stdout.write(self.frame())
+            sys.stdout.flush()
+            key = self.read_key()
+            rows = self.rows
+            if key in ("q", "\x03"):
+                print("\033[0m")
+                return 130
+            if key in ("?", "h"):
+                self.model.note = self.HELP
+            elif key in ("up", "k"):
+                self.cursor = max(0, self.cursor - 1)
+            elif key in ("down", "j"):
+                self.cursor = min(max(0, len(rows) - 1), self.cursor + 1)
+            elif key in (" ",):
+                if rows:
+                    self.model.toggle(rows[min(self.cursor, len(rows) - 1)].id)
+            elif key == "enter":
+                return self.confirm()
+            elif key in ("c", "\t"):
+                cats = [c[0] for c in self.model.categories()]
+                try:
+                    self.model.category = cats[(cats.index(self.model.category) + 1) % len(cats)]
+                except ValueError:
+                    self.model.category = cats[0]
+                self.cursor = 0
+            elif key in ("left",):
+                self.model.category = "all"
+            elif key == "d":
+                self.model.reset_to_defaults()
+            elif key == "a":
+                bundles = self.model.bundle_names()
+                if bundles:
+                    name = self.prompt("bundle to apply", bundles[0], "|".join(bundles))
+                    if name in self.model.catalog.bundles:
+                        self.model.apply_bundle(name)
+            elif key == "/":
+                self.query = self.prompt("search", "", "type text, Enter to accept")
+                self.cursor = 0
+            elif key in ("\x7f", "backspace"):
+                self.query = self.query[:-1]
+            elif len(key) == 1 and key.isprintable():
+                self.query += key
+
+    def prompt(self, label: str, default: str, hint: str) -> str:
+        sys.stdout.write("\033[0m\n  %s (%s) [%s] > " % (label, hint, default))
+        sys.stdout.flush()
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        buf = ""
+        try:
+            tty.setcbreak(fd)
+            while True:
+                ch = os.read(fd, 1).decode("utf-8", "replace")
+                if ch in ("\r", "\n"):
+                    break
+                if ch == "\x7f":
+                    buf = buf[:-1]
+                elif ch == "\x1b":
+                    return default
+                elif ch.isprintable():
+                    buf += ch
+                sys.stdout.write("\r  %s (%s) [%s] > %s" % (label, hint, default, buf))
+                sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return buf.strip() or default
+
+    def confirm(self) -> int:
+        mib, count = self.model.size_estimate()
+        plan = self.model.expand()
+        print("\033[0m\n" + "=" * 78)
+        print("  Ready: %d apps, ~%s of downloads" % (count, human_bytes(mib * 1048576)))
+        print("=" * 78)
+        for group, label in (("pacman", "Arch repository + HedronOS repo"),
+                             ("flatpak", "Flatpak (Flathub)"), ("aur", "AUR (built at install time)"),
+                             ("hedron", "HedronOS native packages"), ("appimage", "AppImages")):
+            items = plan.get(group) or []
+            if items:
+                print("\n  %s — %d" % (label, len(items)))
+                for line in textwrap.wrap(", ".join(items), width=74):
+                    print("    " + line)
+        print("\n  Commands that will run during install:")
+        for cmd in self.model.commands():
+            print("    " + cmd[:100])
+        missing = plan.get("missing_provider") or []
+        if missing:
+            print("\n  \033[33mSkipped (no provider configured): %s\033[0m" % ", ".join(missing))
+        if "steam" not in self.model.selected:
+            print("\n  \033[31msteam is not selected — that should be impossible; please report it.\033[0m")
+        answer = input("\n  Write this selection and continue? [Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            path = self.model.write()
+            print("  saved %s" % path)
+            return 0
+        print("  not saved — press enter to keep editing", end="")
+        input()
+        return 2
+
+
+# ------------------------------------------------------------------ non-interactive
+def cmd_print(args: argparse.Namespace) -> int:
+    model = args.model
+    if args.json:
+        print(json.dumps(model.to_document(), indent=1, sort_keys=True))
+        return 0
+    for cat, name, count in model.categories():
+        print("%s (%d)" % (name, count))
+        for app in (model.catalog.by_category(cat) if cat != "all" else model.catalog.visible()):
+            mark = "×" if app.id in model.selected else " "
+            print("   [%s] %-26s %s" % (mark, app.name, textwrap.shorten(app.summary, 60, placeholder="…")))
+    mib, n = model.size_estimate()
+    print("\n%d app(s), ~%s" % (n, human_bytes(mib * 1048576)))
+    return 0
+
+
+def cmd_select(args: argparse.Namespace) -> int:
+    """Scriptable entry point used by the installer's `--apps` flag and by tests."""
+    model = args.model
+    if args.reset:
+        model.selected = set(model.catalog.locked_ids())
+    if args.bundles:
+        for bundle in args.bundles:
+            if bundle not in model.catalog.bundles:
+                print("unknown bundle %r (have: %s)" % (bundle, ", ".join(sorted(model.catalog.bundles))),
+                      file=sys.stderr)
+                return 2
+            model.apply_bundle(bundle)
+    for app in args.add or []:
+        if app not in model.apps:
+            print("unknown app id %r (`hedron-setup --print` lists them)" % app, file=sys.stderr)
+            return 2
+        model.selected.add(app)
+    for app in args.remove or []:
+        if app in model.catalog.locked_ids():
+            print("%s is locked and cannot be removed" % app, file=sys.stderr)
+            return 2
+        model.selected.discard(app)
+    if args.profile:
+        for app_id in model.catalog.default_selection(args.profile):
+            model.selected.add(app_id)
+    path = model.write(args.out)
+    mib, n = model.size_estimate()
+    print("wrote %s (%d apps, ~%s)" % (path, n, human_bytes(mib * 1048576)))
+    if "steam" not in model.selected:
+        print("WARNING: steam is not in the selection — every HedronOS profile pre-selects it",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_doc(args: argparse.Namespace) -> int:
+    """The single JSON document both GUIs render — keeps all presentation logic out of QML."""
+    model = args.model
+    mib, count = model.size_estimate()
+    apps = []
+    for app in model.catalog.visible():
+        apps.append({"app": app.id, "name": app.name, "summary": app.summary, "category": app.category,
+                     "locked": app.locked, "selected": app.id in model.selected,
+                     "size_mib": app.size_mib, "gaming": app.gaming,
+                     "source": ("pacman" if app.pacman else "flatpak" if app.flatpak else "aur" if app.aur
+                                else "hedron" if app.hedron else "appimage" if app.appimage else "none"),
+                     "provider": (app.pacman or app.flatpak or app.aur or app.hedron or app.appimage or [""])[0]})
+    doc = {"format": "hedron-selection-1", "profile": model.profile,
+           "apps": apps,
+           "categories": [{"id": cid, "name": name, "count": n} for cid, name, n in model.categories()],
+           "bundles": [{"name": k, "apps": v} for k, v in sorted(model.catalog.bundles.items())],
+           "locked": model.catalog.locked_ids(),
+           "selected": sorted(model.selected),
+           "selected_count": count,
+           "size_mib": round(mib, 1),
+           "size_human": human_bytes(mib * 1048576),
+           "commands": model.commands()}
+    print(json.dumps(doc, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    model = args.model
+    path = os.path.join(_HERE, "..", "..", "..", "..", "..", "usr", "share", "hedron", "setup", "Setup.qml")
+    qml = os.path.abspath(path) if os.path.isfile(path) else "/usr/share/hedron/setup/Setup.qml"
+    if not os.path.isfile(qml):
+        print("hedron-setup: Store GUI assets missing (%s) — using the terminal chooser" % qml,
+              file=sys.stderr)
+        return Tui(model).run()
+    for viewer in ("qml", "qmlscene"):
+        if shutil.which(viewer):
+            env = dict(os.environ, HEDRON_SELECTION=SELECTION, HEDRON_APPS_TOML=APPS, HEDRONOS_PROFILE=model.profile)
+            return subprocess.call([viewer, qml], env=env)
+    print("hedron-setup: no QML viewer installed — falling back to the terminal chooser")
+    return Tui(model).run()
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-setup", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apps", default=APPS, help="catalogue to read")
+    ap.add_argument("--profile", default=PROFILE)
+    ap.add_argument("--out", default=SELECTION)
+    ap.add_argument("--gui", action="store_true")
+    ap.add_argument("--tui", action="store_true")
+    ap.add_argument("--print", dest="print_", action="store_true", help="dump the catalogue + selection")
+    ap.add_argument("--doc", action="store_true", help="one JSON document for the GUI (no terminal needed)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--select", nargs="*", default=None, help="non-interactive: add these app ids")
+    ap.add_argument("--deselect", nargs="*", default=None)
+    ap.add_argument("--bundle", dest="bundles", action="append", default=[])
+    ap.add_argument("--reset", action="store_true", help="start from locked apps only")
+    args = ap.parse_args(argv)
+
+    if not os.path.isfile(args.apps):
+        print("hedron-setup: no catalogue at %s\n"
+              "  the live ISO ships this file; on a dev machine point --apps at data/apps.toml"
+              % args.apps, file=sys.stderr)
+        return 1
+    model = Model(Catalog.load(args.apps), profile=args.profile)
+    args.model = model
+
+    if args.doc:
+        return cmd_doc(args)
+    if args.print_:
+        return cmd_print(args)
+    if args.select is not None or args.reset or args.bundles:
+        args.add, args.remove = args.select or [], args.deselect or []
+        return cmd_select(args)
+    if args.gui:
+        return cmd_gui(args)
+    if args.tui or sys.stdin.isatty():
+        return Tui(model).run()
+    print("hedron-setup: interactive chooser needs a tty; falling back to --print", file=sys.stderr)
+    return cmd_print(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

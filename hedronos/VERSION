@@ -1,0 +1,7 @@
+1.0.0
+codename=Halcyon
+series=Halcyon
+release=2026.11.07
+epoch=1728
+base=arch-rolling
+kernel=7.4.0-hedron1

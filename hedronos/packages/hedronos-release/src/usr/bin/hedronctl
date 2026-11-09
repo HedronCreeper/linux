@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""hedronctl — one front door for the parts of HedronOS that used to need six tools.
+
+  hedronctl status                the whole machine in 20 lines (GPU, driver, profile, store)
+  hedronctl features              advertised features and whether they are actually live
+  hedronctl drivers <args>        passthrough to hedron-drivers
+  hedronctl profile <args>        passthrough to hedron-tune
+  hedronctl apps <args>           passthrough to hstore
+  hedronctl rollback <args>       passthrough to hedron-rollback
+  hedronctl boot <entry|list>     which boot entry you are on and what it adds
+  hedronctl report [--out FILE]   everything below, machine-readable, redacted
+  hedronctl logs [-f]             the hedron units' journal, colourised
+
+The passthroughs are not sugar for their own sake: they let us document one command
+(`hedronctl`) in the welcome app while each tool keeps its own CLI, tests and exit codes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+
+# repo checkout (packages/*/src/usr/bin) without an install step, so try both locations.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# Path bootstrap: the same file must work installed (/usr/lib/…) and straight from a repo
+# checkout (packages/<pkg>/src/usr/…) with no install step, so walk up looking for the
+# vendored library instead of hard-coding a depth that changes with the packaging layout.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", os.path.join(_HERE, "..", "python3.13/site-packages")):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")) and _cand not in sys.path:
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+else:
+    _d = _HERE
+    for _ in range(8):
+        _d = os.path.dirname(_d)
+        if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+            sys.path.insert(0, os.path.join(_d, "tools"))
+            break
+
+from hedronlib.util import table  # noqa: E402
+ROOT = os.environ.get("HEDRON_ROOT", "/")
+
+
+def _find(system_path: str, checkout_rel: str = "", env: str = "") -> str:
+    """Resolve a data file across installed system / repo checkout / test root.
+
+    The same script has to work when run from `make test` (no install step) and when run
+    as /usr/bin/hedronctl on a user's machine, so each path is tried in three places.
+    """
+    if env and os.environ.get(env):
+        return os.environ[env]
+    cands = []
+    if ROOT != "/":
+        cands.append(os.path.join(ROOT, system_path.lstrip("/")))
+    cands.append(system_path)
+    if checkout_rel:
+        cands.append(os.path.abspath(os.path.join(_HERE, checkout_rel)))
+    for cand in cands:
+        if os.path.exists(cand):
+            return cand
+    return system_path
+
+
+FEATURES = _find("/etc/hedron/features.json", os.path.join("..", "..", "etc", "hedron", "features.json"),
+                 "HEDRON_FEATURES_JSON")
+RELEASE = _find("/etc/hedron/release.json", os.path.join("..", "..", "etc", "hedron", "release.json"),
+                "HEDRON_RELEASE_JSON")
+STATE = _find("/var/lib/hedron", "", "HEDRON_STATE_PARENT")
+PASSTHROUGH = {"drivers": "hedron-drivers", "profile": "hedron-tune", "apps": "hstore",
+               "rollback": "hedron-rollback", "replay": "hedron-replay", "gpu": "hedron-gpu-detect"}
+
+
+def read(path: str, default: str = "") -> str:
+    """Read a file, or return `default`. Every path here is absolute and optional: a
+    missing /etc/hedron/release.json is a fact about the system, not an error."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return default
+
+
+def release() -> dict:
+    text = read(os.path.join(ROOT, "etc/os-release")) if ROOT != "/" else read("/etc/os-release")
+    out = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key] = value.strip('"')
+    if os.path.isfile(RELEASE):
+        try:
+            out.update(json.loads(read(RELEASE)))
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
+def sh(cmd: str) -> str:
+    try:
+        proc = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return (proc.stderr or "").strip() or ""
+    return (proc.stdout or "").strip()
+
+
+def gpu_lines() -> list[str]:
+    """Prefer our own detector (it knows about plans); fall back to lspci."""
+    if shutil.which("hedron-gpu-detect"):
+        out = sh("hedron-gpu-detect --json")
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            data = {}
+        rows = []
+        for gpu in data.get("gpus", []):
+            plan = gpu.get("plan") or {}
+            rows.append("%s %s [%s] → %s%s" % (
+                gpu.get("vendor", "?"), gpu.get("product", gpu.get("device_id", "?")),
+                gpu.get("kmod", "?"), plan.get("branch", "in-kernel"),
+                " (needs " + ", ".join(plan.get("packages", [])[:2]) + ")" if plan.get("packages") else ""))
+            for warn in gpu.get("warnings", []) or []:
+                rows.append("  ! " + warn)
+        if rows:
+            return rows
+    text = sh("lspci -nnk | grep -Ei 'vga|3d|display' -A3")
+    return [line.strip() for line in text.splitlines()] or ["no GPU visible via lspci"]
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    rel = release()
+    profile = read(os.path.join(STATE, "flowstate/active"), "(none)").strip()
+    default = read(os.path.join(STATE, "flowstate/default"), "").strip()
+    driver_state = ""
+    if os.path.isfile(os.path.join(STATE, "drivers/state.json")):
+        try:
+            data = json.loads(read(os.path.join(STATE, "drivers/state.json")))
+            driver_state = "%s (%s)" % (data.get("plan", "?"), data.get("applied", "?"))
+        except json.JSONDecodeError:
+            driver_state = "(unreadable state file)"
+    else:
+        driver_state = "not applied yet"
+    kernel = sh("uname -r")
+    rows = [
+        ("system", "%s %s (%s)" % (rel.get("PRETTY_NAME", "HedronOS"), rel.get("HEDRONOS_PROFILE", ""),
+                                   rel.get("BUILD_ID", ""))),
+        ("kernel", kernel + ("  [hedron build]" if "hedron" in kernel else "  [NOT the hedron kernel!]")),
+        ("boot", sh("systemd-detect-virt") or "bare metal"),
+        ("gpu", ""),
+        ("drivers", driver_state),
+        ("flowstate", "%s active, %s default" % (profile or "-", default or "-")),
+        ("store", sh("hstore stats --oneline") if shutil.which("hstore") else "not installed"),
+        ("disk", sh("df -h / | awk 'NR==2{print $3\" used of \"$2\" (\"$5\")'}")),
+        ("memory", sh("free -h | awk '/^Mem/{print $3\" used of \"$2}'")),
+        ("steam", sh("test -d /usr/lib/steam && echo installed || echo not installed")),
+    ]
+    for label, value in rows:
+        if label == "gpu":
+            print("gpu")
+            for line in gpu_lines():
+                print("  " + line)
+            continue
+        print("%-9s %s" % (label, value))
+    if args.json:
+        print(json.dumps({"release": rel, "kernel": kernel, "profile": profile, "default_profile": default,
+                          "drivers": driver_state}, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_features(args: argparse.Namespace) -> int:
+    try:
+        doc = json.loads(read(FEATURES))
+    except json.JSONDecodeError:
+        print("hedronctl: %s is missing or corrupt" % FEATURES, file=sys.stderr)
+        return 2
+    rows = []
+    bad = 0
+    for feat in doc.get("features", []):
+        probe = feat.get("probe", "")
+        if args.offline:
+            live = "not checked"
+            ok = feat.get("enabled")
+        else:
+            proc = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+            ok = proc.returncode == 0
+            live = "live" if ok else "MISSING"
+            if not ok and feat.get("enabled"):
+                bad += 1
+        rows.append([feat["id"], "yes" if feat.get("enabled") else "no", live,
+                     feat.get("package", ""), (feat.get("summary", "")[:60] + "…")])
+    print(table(rows, headers=["feature", "shipped", "state", "package", "what it is"]))
+    if not args.offline and bad:
+        print("\n%d shipped feature(s) are not working — run `hedron-doctor why` for the reasons." % bad)
+    if args.json:
+        print(json.dumps(doc, indent=1, sort_keys=True))
+    return 1 if bad else 0
+
+
+def cmd_boot(args: argparse.Namespace) -> int:
+    cmdline = read(os.path.join(ROOT, "proc/cmdline")).strip()
+    print("kernel command line (from %s):\n  %s" % (os.path.join(ROOT, "proc/cmdline") if ROOT != "/" else "/proc/cmdline", cmdline or "(empty)"))
+    tuned = [t for t in cmdline.split() if any(k in t for k in
+             ("nvidia", "amdgpu", "i915", "xe.", "nowatchdog", "threadirqs", "sched_ext", "nosmt",
+              "rcu_nocbs", "isolcpus", "hedron"))]
+    print("\nHedronOS-relevant knobs (%d):" % len(tuned))
+    for token in tuned:
+        print("  • " + token)
+    stub = "/run/systemd/boot/efi"
+    loader = "systemd-boot" if os.path.isdir("/boot/loader/entries") or os.path.isdir(stub) else \
+             ("grub" if os.path.isdir("/boot/grub") else "unknown")
+    print("\nboot loader: %s" % loader)
+    for path in ("/boot/loader/entries", "/boot/efi/loader/entries", "/boot/loader/loader.conf"):
+        if os.path.isdir(path):
+            names = sorted(n for n in os.listdir(path) if n.endswith(".conf"))
+            print("  %s: %s" % (path, ", ".join(names) or "(empty)"))
+        elif os.path.isfile(path):
+            print("  %s:\n%s" % (path, read(path).rstrip()))
+    if args.json:
+        print(json.dumps({"cmdline": cmdline, "hedron_knobs": tuned}, indent=1))
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    units = ["hedron-flowstate.service", "hedron-drivers.service", "hedronos-driverd.service",
+             "hedron-gamemoded.service", "hedron-replayd.service", "hedrostd.service",
+             "hedron-firstboot.service"]
+    cmd = ["journalctl", "--no-pager", "-b", "--pretty"]
+    if args.follow:
+        cmd.append("-f")
+    for unit in units:
+        cmd += ["-u", unit]
+    if args.boot is not None:
+        cmd += ["-b", str(args.boot)]
+    cmd += ["-n", str(args.lines)]
+    print("$ " + " ".join(cmd))
+    return subprocess.call(cmd)
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    payload = {
+        "generated": sh("date -u +%Y-%m-%dT%H:%M:%SZ"),
+        "release": release(),
+        "kernel": {"release": sh("uname -r"), "version": sh("uname -v"), "cmdline": read("/proc/cmdline").strip()},
+        "hardware": {"pci": sh("lspci -nnk"), "usb": sh("lsusb"), "dmi": read("/sys/class/dmi/id/product_name").strip(),
+                     "cpufreq": sh("sh -c 'LC_ALL=C lscpu | head -20'")},
+        "gpu": "\n".join(gpu_lines()),
+        "driver_state": read(os.path.join(STATE, "drivers/state.json")),
+        "plans": read(os.path.join(ROOT, "etc/hedron/gpu-plans.json"))[:4000],
+        "flowstate": {"active": read(os.path.join(STATE, "flowstate/active")),
+                      "transactions": sorted(os.listdir(os.path.join(STATE, "flowstate/transactions")))[-5:]
+                      if os.path.isdir(os.path.join(STATE, "flowstate/transactions")) else []},
+        "features": _features_state(),
+        "packages": sh("pacman -Qe 2>/dev/null | head -200"),
+        "modules": sh("lsmod | head -60"),
+        "dmesg_errors": sh("dmesg --level=err,warn 2>/dev/null | tail -120"),
+        "units_failed": sh("systemctl --failed --no-legend --plain"),
+        "notes": "Redaction: hostnames, MACs, serials and user paths are normalised by hedron-doctor bundle.",
+    }
+    text = json.dumps(payload, indent=1, sort_keys=True)
+    if args.out and args.out != "-":
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        print("wrote %s (%d KiB)" % (args.out, len(text) // 1024 + 1))
+    else:
+        print(text)
+    return 0
+
+
+def _features_state() -> list[dict]:
+    try:
+        doc = json.loads(read(FEATURES))
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for feat in doc.get("features", []):
+        proc = subprocess.run(["bash", "-c", feat.get("probe", "false")], capture_output=True, text=True)
+        out.append({"id": feat["id"], "enabled": feat.get("enabled", False), "live": proc.returncode == 0,
+                    "stderr": proc.stderr.strip()[:200]})
+    return out
+
+
+def cmd_passthrough(name: str, rest: list[str]) -> int:
+    target = PASSTOOL(name)
+    if not target:
+        print("hedronctl: %s is not installed on this system" % name, file=sys.stderr)
+        return 127
+    return subprocess.call([target] + rest)
+
+
+def PASSTOOL(name: str) -> str | None:
+    binary = PASSTHROUGH[name]
+    return shutil.which(binary)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Passthroughs bypass argparse entirely so that `hedronctl drivers --explain nvidia`
+    # forwards every flag untouched to hedron-drivers (which owns its own help text).
+    if argv and argv[0] in PASSTHROUGH:
+        return cmd_passthrough(argv[0], argv[1:])
+    ap = argparse.ArgumentParser(prog="hedronctl", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog="also: " + ", ".join("hedronctl %s …" % k for k in sorted(PASSTHROUGH)))
+    # --json is accepted on the subcommands that can emit it (a shared parent parser keeps
+    # the flag off the ones that cannot, so `hedronctl logs --json` correctly errors out).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("status", help="summary of the whole machine", parents=[common]).set_defaults(func=cmd_status)
+    p = sub.add_parser("features", help="shipped features and whether they are live", parents=[common])
+    p.add_argument("--offline", action="store_true", help="do not run the probes")
+    p.set_defaults(func=cmd_features)
+    sub.add_parser("boot", help="boot entry and kernel command line", parents=[common]).set_defaults(func=cmd_boot)
+    p = sub.add_parser("logs", help="journal for the HedronOS units")
+    p.add_argument("-f", "--follow", action="store_true")
+    p.add_argument("-n", "--lines", type=int, default=200)
+    p.add_argument("-b", "--boot", type=int, default=None)
+    p.set_defaults(func=cmd_logs)
+    p = sub.add_parser("report", help="machine-readable state dump", parents=[common])
+    p.add_argument("--out", default="-")
+    p.set_defaults(func=cmd_report)
+
+    args = ap.parse_args(argv)
+    if args.cmd is None:
+        return cmd_status(argparse.Namespace(json=False))
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""hedron-gpu-detect — print the GPU/graphics facts HedronOS cares about, as JSON.
+
+Read-only, no root needed, no network. This is the *input* half of the driver engine;
+`hedron-drivers` is the decision+action half. Kept separate so a user (or a bug
+report) can show what the machine looks like without any chance of changing it.
+
+  hedron-gpu-detect                 # human summary
+  hedron-gpu-detect --json          # machine-readable
+  hedron-gpu-detect --from-lspci out.txt
+  hedron-gpu-detect --explain       # annotate every decision input with its source
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+# repo checkout (packages/*/src/usr/bin) without an install step, so try both locations.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# Path bootstrap: the same file must work installed (/usr/lib/…) and straight from a repo
+# checkout (packages/<pkg>/src/usr/…) with no install step, so walk up looking for the
+# vendored library instead of hard-coding a depth that changes with the packaging layout.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages", os.path.join(_HERE, "..", "python3.13/site-packages")):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")) and _cand not in sys.path:
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+else:
+    _d = _HERE
+    for _ in range(8):
+        _d = os.path.dirname(_d)
+        if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+            sys.path.insert(0, os.path.join(_d, "tools"))
+            break
+
+from hedronlib import gpus  # noqa: E402
+from hedronlib.gpus import read_file
+from hedronlib.util import table  # noqa: E402
+
+
+def modprobe_resolve(sysfs_root: str, modalias: str) -> list[str]:
+    try:
+        out = subprocess.run(["modprobe", "--resolve-alias", modalias], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    return sorted({line.split()[0] for line in out.stdout.splitlines() if line.strip()})
+
+
+def secure_boot_state(root: str = "/sys") -> bool:
+    """UEFI Secure Boot SetupMode: 1 means enrolled (i.e. ON)."""
+    for rel in ("firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c/data",
+                "firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"):
+        path = os.path.join(root, rel)
+        raw = _read_bytes(path)
+        if raw and len(raw) >= 1:
+            return raw[-1] == 1
+    return False
+
+
+def _read_bytes(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def efi_boot() -> bool:
+    return os.path.isdir("/sys/firmware/efi/efivars") or os.path.isdir("/sys/firmware/efi")
+
+
+def kernel_release(override: str | None = None) -> str:
+    if override:
+        return override
+    return os.uname().release
+
+
+def loaded_modules() -> set[str]:
+    out: set[str] = set()
+    try:
+        with open("/proc/modules", encoding="utf-8") as fh:
+            for line in fh:
+                name = line.split(" ", 1)[0].strip()
+                if name:
+                    out.add(name)
+    except OSError:
+        pass
+    return out
+
+
+def drm_cards(root: str = "/sys") -> list[dict]:
+    """Per-card facts from /sys/class/drm, including driver and enabled connectors."""
+    base = os.path.join(root, "class", "drm")
+    cards: list[dict] = []
+    if not os.path.isdir(base):
+        return cards
+    for name in sorted(os.listdir(base)):
+        path = os.path.join(base, name)
+        if not (name.startswith(("card", "renderD")) and os.path.isdir(path)):
+            continue
+        entry: dict = {"name": name}
+        for key in ("enabled", "dpms_status"):
+            value = read_file(os.path.join(path, key))
+            if value:
+                entry[key] = value
+        for prop in os.listdir(path) if os.path.isdir(path) else []:
+            if prop.startswith(("card", "renderD")):
+                continue
+            full = os.path.join(path, prop)
+            if os.path.isfile(full) and prop in ("device",):
+                continue
+        driver = os.path.realpath(os.path.join(path, "device", "driver")) if \
+            os.path.islink(os.path.join(path, "device", "driver")) else ""
+        if driver:
+            entry["driver"] = os.path.basename(driver)
+        uevent = read_file(os.path.join(path, "device", "uevent")) or ""
+        for line in uevent.splitlines():
+            key, _, value = line.partition("=")
+            if key in ("PCI_ID", "PCI_CLASS", "DRIVER"):
+                entry[key.lower()] = value
+        for connector in sorted(os.listdir(path)) if os.path.isdir(path) else []:
+            if "-" in connector:
+                state = read_file(os.path.join(path, connector, "status"))
+                if state:
+                    entry.setdefault("connectors", {})[connector] = state
+        cards.append(entry)
+    return cards
+
+
+def build_info(args: argparse.Namespace) -> gpus.SystemInfo:
+    lspci_text = None
+    if args.from_lspci:
+        with open(args.from_lspci, encoding="utf-8", errors="replace") as fh:
+            lspci_text = fh.read()
+    info = gpus.collect_system_info(
+        sysfs_root=args.sysfs,
+        lspci_text=lspci_text,
+        kernel_release=kernel_release(args.kernel_release),
+    )
+    info.efi = args.force_efi if args.force_efi is not None else efi_boot()
+    info.secure_boot = bool(args.force_secure_boot) if args.force_secure_boot is not None \
+        else secure_boot_state(args.sysfs)
+    info.modules_loaded = loaded_modules() or info.modules_loaded
+    # Prefill modalias → module answers so plans include the right MODULES= list even
+    # for devices the live kernel has not bound yet (fresh install!).
+    for dev in info.devices:
+        alias = dev.modalias()
+        if alias and alias not in gpus.MODALIAS_MODULE_CACHE:
+            gpus.MODALIAS_MODULE_CACHE[alias] = modprobe_resolve(args.sysfs, alias)
+    if args.dmi_dir:
+        dmi = {}
+        for name in os.listdir(args.dmi_dir):
+            value = read_file(os.path.join(args.dmi_dir, name))
+            if value:
+                dmi[name] = value
+        if dmi:
+            info.dmi = dmi
+    return info
+
+
+def human(info: gpus.SystemInfo, db: gpus.GpuDatabase | None, explain: bool) -> str:
+    lines: list[str] = []
+    lines.append("HedronOS graphics probe")
+    lines.append("  kernel       : %s" % (info.kernel or "unknown"))
+    lines.append("  firmware     : %s (Secure Boot %s)"
+                 % ("UEFI" if info.efi else "BIOS/CSM", "on" if info.secure_boot else "off"))
+    lines.append("  machine      : %s" % (info.product() or "unknown"))
+    lines.append("  cpu          : %s" % (info.cpu.get("model", "unknown")))
+    if info.memory_mib:
+        lines.append("  memory       : %.1f GiB" % (info.memory_mib / 1024))
+    lines.append("  shape        : %s" % ("handheld" if info.is_handheld()
+                                          else "laptop" if info.is_laptop() else "desktop"))
+    if info.hybrid:
+        lines.append("  hybrid       : yes (multi-vendor GPUs present)")
+    rows = []
+    for dev in info.devices:
+        if not (dev.is_gpu or dev.is_hdmi_audio):
+            continue
+        row = [dev.slot, dev.vendor_name, "%04x" % dev.device,
+               dev.driver or "-", ", ".join(dev.modules) or "-"]
+        if db is not None:
+            ident = db.lookup(dev)
+            row.append("%s g%s%s" % (ident.family, ident.generation,
+                                     "" if ident.in_database else "*"))
+            row.append(ident.kmod)
+            if explain:
+                row.append(ident.source)
+        rows.append(row)
+    if rows:
+        header = ["slot", "vendor", "dev", "bound driver", "modules"]
+        if db is not None:
+            header += ["family/gen", "kmod"]
+            if explain:
+                header += ["source"]
+        lines.append("")
+        lines.append(table(rows, headers=header, sep="  "))
+        if db is not None:
+            lines.append("  (* = id not in the generated database; resolved by class/arithmetic)")
+    else:
+        lines.append("\n  no display-class PCI device found (VM without virtio-gpu?)")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0].split(" — ")[-1])
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--explain", action="store_true", help="annotate where each answer came from")
+    ap.add_argument("--from-lspci", metavar="FILE", help="parse an `lspci -nn` capture instead of /sys")
+    ap.add_argument("--sysfs", default="/sys", help="alternate sysfs root (tests, chroots)")
+    ap.add_argument("--dmi-dir", default=None, help="alternate /sys/class/dmi/id directory")
+    ap.add_argument("--kernel-release", default=None)
+    ap.add_argument("--db", default=None, help="gpu-db.json for classification (default: system copy)")
+    ap.add_argument("--no-db", action="store_true", help="skip classification")
+    ap.add_argument("--force-efi", type=lambda v: v in ("1", "true", "yes"), default=None)
+    ap.add_argument("--force-secure-boot", type=lambda v: v in ("1", "true", "yes"), default=None)
+    args = ap.parse_args(argv)
+
+    info = build_info(args)
+
+    db = None
+    db_path = args.db
+    if db_path is None and not args.no_db:
+        for candidate in ("/etc/hedron/gpu-db.json",
+                          os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "..", "..", "data", "gpu-db", "gpu-db.json"),
+                          "data/gpu-db/gpu-db.json"):
+            if os.path.isfile(candidate):
+                db_path = candidate
+                break
+    if db_path and os.path.isfile(db_path):
+        try:
+            db = gpus.GpuDatabase(json.load(open(db_path, encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            print("warning: could not read %s (%s)" % (db_path, exc), file=sys.stderr)
+
+    if args.json:
+        payload = info.as_dict()
+        payload["db"] = db_path
+        payload["classification"] = []
+        if db is not None:
+            for dev in info.devices:
+                if dev.is_gpu or dev.is_hdmi_audio:
+                    payload["classification"].append(db.lookup(dev).as_dict())
+        payload["drm_cards"] = drm_cards(args.sysfs)
+        print(json.dumps(payload, indent=1, sort_keys=True))
+    else:
+        print(human(info, db, args.explain))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

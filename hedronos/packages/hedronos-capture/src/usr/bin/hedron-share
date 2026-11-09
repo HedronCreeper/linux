@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# hedron-share — turn a clip into something you can actually send.  SPDX-License-Identifier: MIT
+#
+# Usage:
+#   hedron-share [options] CLIP
+#
+# Options:
+#   -t, --target NAME    discord | chat | forum | raw  (default: discord)
+#   -m, --max-mib N      override the size budget for the target
+#   -o, --out FILE       write somewhere other than next to the clip
+#   -c, --clipboard      copy the result instead of leaving a file behind
+#   -h, --help           this text
+#
+# Each target is a ceiling, not a style: Discord free caps uploads at 10 MiB (25 for a boosted
+# account), chat apps around 100 MiB, forums rarely below 500. `raw` transcodes nothing and simply
+# reports whether the file will pass, because when the clip is already small the honest answer is
+# "send it as it is".
+#
+#   hedron-share clip.mkv                 transcode to a Discord-sized H.264 mp4 next to it
+#   hedron-share --target discord clip.mkv
+#   hedron-share --target chat --max-mib 8 clip.mkv
+#   hedron-share --clipboard clip.mkv     copy the file to the clipboard (KDE/GNOME aware)
+#
+# Why: every platform has a different ceiling (Discord 10 MiB free / 25 MiB boosted, chat apps
+# ~100 MiB, forums bigger) and the usual advice — "re-encode it" — costs 4 minutes and quality.
+# We do one predictable pass with the *hardware* encoder at a bitrate derived from the target
+# size, which is both fast and good enough for a highlight.
+set -euo pipefail
+
+public_usage() {
+	# The header comment is the manual page, so `--help` prints the header: the two can
+	# then never disagree, and the range cannot go stale when the header gains a line.
+	awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
+}
+
+target=discord
+max_mib=
+clipboard=0
+out=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--target)
+		target=$2
+		shift 2
+		;;
+	--max-mib)
+		max_mib=$2
+		shift 2
+		;;
+	--out)
+		out=$2
+		shift 2
+		;;
+	--clipboard)
+		clipboard=1
+		shift
+		;;
+	-h | --help)
+		public_usage
+		exit 0
+		;;
+	*) break ;;
+	esac
+done
+
+src=${1:-}
+[ -n "$src" ] && [ -f "$src" ] || {
+	echo "usage: hedron-share [--target discord|chat|forum|raw] [--max-mib N] [--out FILE] FILE" >&2
+	exit 2
+}
+
+case "$target" in
+discord) max_mib=${max_mib:-23} ;;
+chat) max_mib=${max_mib:-96} ;;
+forum) max_mib=${max_mib:-250} ;;
+raw)
+	echo "raw: using $src as-is"
+	[ "$clipboard" = 1 ] && copy_clip "$src"
+	exit 0
+	;;
+*)
+	echo "hedron-share: unknown --target $target" >&2
+	exit 2
+	;;
+esac
+
+dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$src" 2>/dev/null || echo 0)
+[ "${dur%.*}" -gt 0 ] 2>/dev/null || {
+	echo "hedron-share: could not read the duration of $src (is it a complete file?)" >&2
+	exit 1
+}
+# bitrate = bytes/target - audio, in kbps, floor of 1.5 Mb/s so 60 fps stays watchable
+kbps=$((max_mib * 8 * 1024 / ${dur%.*} - 128))
+[ "$kbps" -lt 1500 ] && kbps=1500
+
+[ -n "$out" ] || out="${src%.mkv}-$target.mp4"
+echo "encoding ${dur%.*}s into ${max_mib} MiB → $((kbps)) kbps with the GPU"
+encoder=h264_nvenc
+if ffmpeg -hide_banner -loglevel error -encoders 2>/dev/null | grep -q ' h264_amf'; then
+	encoder=h264_amf
+fi
+if ! ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=black:s=64x64:d=0.1 -c:v "$encoder" -f null - 2>/dev/null; then
+	encoder=libx264
+	echo "  (no working hardware encoder: using libx264 -this will take a while)"
+fi
+ffmpeg -hide_banner -loglevel error -i "$src" -c:v "$encoder" -b:v "${kbps}k" -maxrate "${kbps}k" \
+	-bufsize "$((kbps * 2))k" -preset 5 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart -y "$out"
+
+size=$(stat -c %s "$out")
+if [ "$size" -gt $((max_mib * 1024 * 1024)) ]; then
+	echo "  result is $((size / 1048576)) MiB, over the $max_mib MiB budget — retrying lower"
+	kbps=$((kbps * max_mib * 1024 * 1024 / size - 64))
+	ffmpeg -hide_banner -loglevel error -i "$src" -c:v "$encoder" -b:v "${kbps}k" -maxrate "${kbps}k" \
+		-bufsize "$((kbps * 2))k" -pix_fmt yuv420p -c:a aac -b:a 96k -movflags +faststart -y "$out"
+	size=$(stat -c %s "$out")
+fi
+echo "wrote $out ($((size / 1048576)) MiB)"
+
+copy_clip() {
+	local file=$1
+	if command -v xclip >/dev/null 2>&1; then
+		xclip -selection clipboard -t text/uri-list <<<"file://$file"
+	elif command -v wl-copy >/dev/null 2>&1; then
+		printf 'file://%s' "$file" | wl-copy
+	else
+		echo "  (no xclip/wl-copy: install one of them for clipboard support)" >&2
+	fi
+}
+[ "$clipboard" = 1 ] && copy_clip "$(realpath "$out")"
+exit 0

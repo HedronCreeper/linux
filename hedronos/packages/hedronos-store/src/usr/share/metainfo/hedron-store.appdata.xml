@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HedronOS store: appstream metadata so other tools can describe the store. -->
+<component type="desktop-application">
+  <id>local.hedronos.Store</id>
+  <name>HedronOS Store</name>
+  <summary>Install games and apps from one place</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <developer_name>HedronOS</developer_name>
+  <categories><category>System</category><category>Settings</category></categories>
+  <description><p>One signed index over pacman, Flatpak, AUR and AppImage backends, with a
+  journal so any transaction can be reverted, and the same catalogue the installer showed.</p></description>
+  <releases><release version="1.0.0" date="2026-11-07"><description><p>First release.</p></description></release></releases>
+  <launchable type="desktop-id">hedron-store.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+</component>

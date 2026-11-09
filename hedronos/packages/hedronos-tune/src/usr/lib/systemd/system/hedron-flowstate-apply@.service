@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS FlowState: apply the default profile once (%i)
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=systemd-sysctl.service systemd-modules-load.service
+ConditionPathExists=!/var/lib/hedron/flowstate/locked
+
+[Service]
+Type=oneshot
+# Instances: @boot (after the ISO-chosen default), @resume (firmware resets half of these
+# knobs across s2idle) and @plug (power-source change). The profile name is never
+# hard-coded here — `hedron-tune profile set` owns it — so a user changing their default
+# does not need to touch a unit file.
+ExecStart=/usr/bin/sh -c 'p=$(sed -n 1p /var/lib/hedron/flowstate/default 2>/dev/null); exec /usr/bin/hedron-tune apply "${p:-balanced}" --reason "%i"'
+RemainAfterExit=yes

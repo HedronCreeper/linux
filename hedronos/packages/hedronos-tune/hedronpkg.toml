@@ -1,0 +1,52 @@
+# hedronos-tune — FlowState, the transactional performance engine. SPDX-License-Identifier: MIT
+[package]
+name = "hedronos-tune"
+version = "1.0.0"
+release = "1"
+summary = "FlowState: transactional CPU/GPU/scheduler tuning with per-app activation and rollback"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["python", "cpupower", "procps-ng", "kmod", "systemd"]
+build = ["make", "gcc"]
+optional = ["zram-generator", "irqbalance", "power-profiles-daemon"]
+
+[build]
+command = "make @JOBS@"
+
+[install]
+tree = "src"
+vendored = [{ from = "hedronlib", to = "usr/lib/python3.13/site-packages/hedronlib" }]
+
+[install.modes]
+"usr/lib/systemd/system/hedron-scheduler.service" = "0644"
+"usr/bin/hedron-tune" = "0755"
+"usr/lib/hedron/hedronflowd.py" = "0755"
+"usr/bin/hedron-latency" = "0755"
+"usr/lib/tmpfiles.d/hedron-tune.conf" = "0644"
+"usr/lib/sysusers.d/hedron-tune.conf" = "0644"
+"etc/hedron/flowstate.d/10-base.toml" = "0644"
+"etc/hedron/flowstate.d/20-balanced.toml" = "0644"
+"etc/hedron/flowstate.d/30-gaming.toml" = "0644"
+"etc/hedron/flowstate.d/35-performance.toml" = "0644"
+"etc/hedron/flowstate.d/25-battery.toml" = "0644"
+"etc/hedron/flowstate.d/25-silence.toml" = "0644"
+"etc/hedron/flowstate.d/30-studio.toml" = "0644"
+"etc/hedron/flowstate.d/30-handheld.toml" = "0644"
+"etc/hedron/flowstate.d/60-overlay-amd.toml" = "0644"
+"etc/hedron/flowstate.d/60-overlay-nvidia.toml" = "0644"
+"etc/hedron/flowstate.d/60-overlay-intel.toml" = "0644"
+"etc/hedron/flowstate.d/60-overlay-laptop.toml" = "0644"
+"etc/hedron/flowstate.d/60-overlay-handheld.toml" = "0644"
+
+[services]
+enable = ["hedron-flowstate.service", "hedron-flowstate-apply@.service"]
+units = ["usr/lib/systemd/system/hedron-flowstate.service",
+         "usr/lib/systemd/system/hedron-flowstate-apply@.service",
+         "usr/lib/systemd/system/user@.service.d/hedron-slice.conf"]
+
+[files]
+preserve = ["/etc/hedron/flowstate.d/30-gaming.toml", "/etc/hedron/flowstate.conf"]

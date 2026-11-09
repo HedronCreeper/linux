@@ -1,0 +1,11 @@
+# Plymouth splash: the boot you can watch and read. SPDX-License-Identifier: MIT
+[Plymouth Theme]
+Name=HedronOS
+Description=Rotating hedron with the boot question and answer on one line
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/hedronos
+ScriptDir=/usr/share/plymouth/themes/hedronos
+Font=JetBrains Mono
+FontSize=11

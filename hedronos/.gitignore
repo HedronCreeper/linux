@@ -1,0 +1,20 @@
+# HedronOS build and tooling artifacts. SPDX-License-Identifier: MIT
+#
+# A distro layer living inside a kernel tree must never end up carrying its own build output: the
+# only binaries here are produced by the package Makefiles (and by build.sh), from C in this tree.
+work/
+dist/
+__pycache__/
+*.py[cod]
+verification-report.json
+
+# Compiled by the package Makefiles (each package's [build] command runs `make`, and stage_packages
+# does too), and installed from there by [install].tree = "src". The sources are in
+# packages/*/src/usr/src/.
+packages/hedronos-gamemode/src/usr/bin/hgm
+packages/hedronos-tune/src/usr/bin/hedron-latency
+
+# Qt GUI host: only built when the host has Qt6 (build.sh checks for cmake + qmake6).
+qt/build/
+qt/hedronos-store
+qt/hedronos-feed

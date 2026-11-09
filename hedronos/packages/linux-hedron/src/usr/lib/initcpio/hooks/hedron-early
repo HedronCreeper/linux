@@ -1,0 +1,18 @@
+#!/usr/bin/ash
+# initramfs run script for the hedron-early hook. SPDX-License-Identifier: MIT
+run_hook() {
+    # Nothing to do if a driver is already bound (firmware-loaded, or =y in the kernel): the point
+    # of this hook is to *avoid* a late modprobe, not to fight the kernel over who owns the device.
+    if [ -e /sys/class/drm/card0 ]; then
+        return 0
+    fi
+    if [ -x /usr/bin/hedron-gpu-detect ]; then
+        /usr/bin/hedron-gpu-detect --quiet --apply-early 2>&1 | sed 's/^/hedron-early: /' || true
+    fi
+    for mod in amdgpu i915 nouveau; do
+        if [ -d "/sys/module/$mod" ]; then continue; fi
+        modprobe "$mod" 2>/dev/null && echo "hedron-early: loaded $mod early" && break
+    done
+    return 0
+}
+# vim: set ft=sh ts=4 sw=4 noet:

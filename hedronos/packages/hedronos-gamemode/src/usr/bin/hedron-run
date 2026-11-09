@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# hedron-run — launch a program with a game claim, in the game slice, with sane defaults.
+#
+# SPDX-License-Identifier: MIT
+#
+# Usage:
+#   hedron-run [options] -- <program> [args...]
+# Options:
+#   --no-slice          skip the hedron-game.slice placement (use the caller's cgroup)
+#   --wrap "CMD"        prefix the launch with a profiler or overlay, e.g. "mangohud"
+#   --timeout SECS      release the claim automatically if the launcher hangs that long
+#   --help              this text
+#   hedron-run ./mygame                 claim + slice + priority, exec in place
+#   hedron-run --no-slice -- wine x.exe
+#   hedron-run --wrap "mangohud" ./game
+#   hedron-run --timeout 3600 ./game    auto-release if the wrapper hangs after an hour
+#
+# Why a wrapper instead of trusting the game to call libgamemode: most titles never do, and
+# Proton games outlive their own process name. So we claim for the *launcher* PID, exec the
+# game, and rely on the daemon's liveness rule (claim dies with the pid) for cleanup — which
+# is why this script can be Ctrl-C'd or killed and nothing stays tuned-up by accident.
+set -euo pipefail
+
+public_usage() {
+	# The header comment is the manual page, so `--help` prints the header: the two can
+	# then never disagree, and the range cannot go stale when the header gains a line.
+	awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
+}
+
+usage() {
+	public_usage
+}
+
+HGM=${HGM:-hgm}
+FLOWSTATE=${HEDRON_FLOWSTATE:-hedron-tune}
+slice=hedron-game.slice
+useslice=1
+wrap=()
+timeout=()
+nice=-1
+oom=-500
+env_extra=()
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--help | -h)
+		usage
+		exit 0
+		;;
+	--no-slice)
+		useslice=0
+		shift
+		;;
+	--slice)
+		slice=$2
+		shift 2
+		;;
+	--wrap)
+		# shellcheck disable=SC2206 # deliberate word splitting: --wrap "mangohud gamemode"
+		wrap=(${2:-})
+		shift 2
+		;;
+	--env)
+		env_extra+=("$2")
+		shift 2
+		;;
+	--timeout)
+		timeout=(--property=RuntimeMaxSec="$2")
+		shift 2
+		;;
+	--nice)
+		nice=$2
+		shift 2
+		;;
+	--game-mode | --no-game-mode)
+		if [ "$1" = "--no-game-mode" ]; then HGM=:; fi
+		shift
+		;;
+	--)
+		shift
+		break
+		;;
+	*) break ;;
+	esac
+done
+
+[ $# -gt 0 ] || {
+	echo "hedron-run: nothing to run (try --help)" >&2
+	exit 2
+}
+
+if [ ! -x "$1" ] && ! command -v "$1" >/dev/null 2>&1; then
+	echo "hedron-run: '$1' is not executable or not on PATH" >&2
+	exit 127
+fi
+
+app=$(basename "$1")
+
+# The claim is advisory (it nudges FlowState + scheduler); the slice is the real mechanism.
+# Both are best-effort by design: a user running this in a chroot with no systemd must still
+# get their game, just untuned — so we warn instead of failing.
+claim() { "$HGM" start "$$" "hedron-run:$app" >/dev/null 2>&1 || true; }
+unclaim() { "$HGM" end "$$" >/dev/null 2>&1 || true; }
+trap unclaim EXIT INT TERM
+
+claim
+
+if [ "$useslice" = 1 ] && command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+	exec_cmd=(systemd-run --user --quiet --wait --slice="$slice" \
+		--property=Nice="$nice" --property=OOMScoreAdjust="$oom" "${timeout[@]+"${timeout[@]}"}")
+	for kv in ${env_extra[@]+"${env_extra[@]}"}; do exec_cmd+=(--setenv="$kv"); done
+	exec_cmd+=("${wrap[@]+"${wrap[@]}"}" "$@")
+	"${exec_cmd[@]}"
+	rc=$?
+else
+	if [ "$useslice" = 1 ]; then
+		echo "hedron-run: no user systemd here — running without the game slice" >&2
+	fi
+	# shellcheck disable=SC2086 # env_extra is a list of KEY=VALUE pairs, split on purpose
+	[ ${#wrap[@]} -gt 0 ] && exec "${wrap[@]}" "$@"
+	exec env ${env_extra[@]+"${env_extra[@]}"} nice -n "$nice" "$@"
+fi
+exit "${rc:-0}"

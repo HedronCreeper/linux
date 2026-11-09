@@ -1,2 +1,4 @@
 tools/
 build/
+scx_hedron
+scx_hedron.bpf.o

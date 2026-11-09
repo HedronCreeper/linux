@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""hedron-session-query — "what is focused, and is it fullscreen?" for scripts.
+
+Every other tool has its own idea of how to ask this (kdotool, qdbus, wlrctl, xdotool,
+activewindow…) and each works on exactly one setup. hedronflowd and hedron-doctor call this
+instead, so the discovery lives once, in order of preference, and always answers in the same
+shape even when it has no idea:
+
+  {"app_id":"cs2","title":"Counter-Strike 2","state":"fullscreen","pid":4242,
+   "source":"focus-file","confident":true}
+
+Exit code is 0 when the answer is trustworthy, 3 when it is a best guess, 1 when there is
+no session at all — so a caller can `|| true` without pretending nothing happened.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+FULLSCREEN_HINTS = ("fullscreen", "exclusive", "override-redirect", "scaler")
+
+
+def sh(cmd: list[str], timeout: float = 4.0) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", "%s" % exc
+
+
+def from_focus_file() -> dict | None:
+    path = os.path.expanduser(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()))
+    path = os.path.join(path, "hedron", "focus.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc.setdefault("source", "focus-file")
+        doc["confident"] = True
+        return doc
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def from_kwin() -> dict | None:
+    """KWin 6: prefer the D-Bus call our shipped script exposes, then kdotool, then nothing.
+
+    Each fallback is marked `confident:false` when it cannot tell us fullscreen state — the
+    caller uses that to decide whether to act on the answer or just log it.
+    """
+    rc, out, _err = sh(["qdbus", "org.kde.KWin", "/KWin", "call", "activeWindowInfo"])
+    if rc == 0 and out.strip():
+        try:
+            doc = json.loads(out)
+            doc.setdefault("source", "kwin-dbus")
+            doc["confident"] = True
+            return doc
+        except json.JSONDecodeError:
+            pass
+    rc, out, _err = sh(["kdotool", "getactivewindow", "getwindowname"])
+    if rc == 0 and out.strip():
+        return {"app_id": "", "title": out.strip(), "state": "windowed", "pid": 0,
+                "source": "kdotool", "confident": False}
+    return None
+
+
+def from_hyprland() -> dict | None:
+    rc, out, _err = sh(["hyprctl", "activewindow", "-j"])
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    fullscreen = any(f in json.dumps(data).lower() for f in ("fullscreen\":1", "fullscreen\": 1"))
+    return {"app_id": data.get("initialClass", "") or data.get("class", ""),
+            "title": data.get("title", ""), "state": "fullscreen" if fullscreen else "windowed",
+            "pid": data.get("pid", 0), "source": "hyprctl", "confident": True}
+
+
+def from_sway() -> dict | None:
+    rc, out, _err = sh(["swaymsg", "-t", "get_tree"])
+    if rc != 0:
+        return None
+    try:
+        tree = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+
+    def walk(node):
+        if node.get("focused"):
+            return node
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            found = walk(child)
+            if found:
+                return found
+        return None
+
+    node = walk(tree)
+    if not node:
+        return None
+    return {"app_id": node.get("app_id", "") or node.get("pid", ""),
+            "title": node.get("name", ""), "state": "fullscreen" if node.get("fullscreen_mode") else "windowed",
+            "pid": node.get("pid", 0), "source": "sway", "confident": True}
+
+
+def from_x11() -> dict | None:
+    if not os.environ.get("DISPLAY"):
+        return None
+    rc, out, _err = sh(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
+    if rc != 0:
+        return None
+    match = re.search(r"window id # (0x[0-9a-f]+)", out, re.I)
+    if not match:
+        return None
+    wid = match.group(1)
+    rc, name, _err = sh(["xprop", "-id", wid, "WM_CLASS", "_NET_WM_NAME"])
+    app = ""
+    title = ""
+    for line in name.splitlines():
+        if line.startswith("WM_CLASS"):
+            vals = re.findall(r'"([^"]*)"', line)
+            app = vals[-1] if vals else ""
+        elif line.startswith("_NET_WM_NAME"):
+            title = line.partition("=")[2].strip().strip('"')
+    state = "windowed"
+    rc, geom, _err = sh(["xdotool", "getwindowgeometry", "--shell", wid])
+    if rc == 0:
+        rc2, screen, _e = sh(["xdotool", "getdisplaygeometry"])
+        if rc2 == 0 and screen and "SCREENWIDTH" in geom:
+            try:
+                gw = int(re.search(r"WIDTH=(\d+)", geom).group(1))
+                gh = int(re.search(r"HEIGHT=(\d+)", geom).group(1))
+                sw, sh_ = (int(x) for x in screen.split())
+                if gw >= sw and gh >= sh_:
+                    state = "fullscreen"
+            except (AttributeError, ValueError):
+                pass
+    return {"app_id": app, "title": title, "state": state, "pid": 0, "source": "x11",
+            "confident": state == "fullscreen"}
+
+
+def query() -> dict:
+    for probe in (from_focus_file, from_hyprland, from_sway, from_kwin, from_x11):
+        doc = probe()
+        if doc:
+            doc.setdefault("confident", False)
+            return doc
+    return {"app_id": "", "title": "", "state": "unknown", "pid": 0, "source": "none",
+            "confident": False}
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-session-query", description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("what", nargs="?", default="focused", choices=["focused"])
+    args = ap.parse_args(argv)
+    doc = query()
+    if args.json:
+        print(json.dumps(doc, sort_keys=True))
+    else:
+        print("%s [%s]%s" % (doc.get("app_id") or doc.get("title") or "nothing", doc["source"],
+                              " (" + doc["state"] + ")" if doc["state"] != "unknown" else ""))
+    if doc["source"] == "none":
+        return 1
+    return 0 if doc.get("confident") else 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

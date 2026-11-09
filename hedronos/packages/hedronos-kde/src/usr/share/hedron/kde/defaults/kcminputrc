@@ -1,0 +1,17 @@
+# Input defaults: a gaming box wants the mouse to be *boring* — no acceleration, no
+# acceleration-in-disguise pointer speed, no tap-on-scroll-lock.
+[Keyboard]
+NumLock=2
+ClickVolume=0
+
+[Mouse]
+cursorTheme=breeze_cursors
+cursorSize=24
+reversedScrolling=false
+leftHanded=false
+# 0 = exactly the raw value; anything else is a curve between you and the crosshair.
+pointerAcceleration=0
+pointerSpeed=0
+
+[MouseButtons]
+LeftHanded=false

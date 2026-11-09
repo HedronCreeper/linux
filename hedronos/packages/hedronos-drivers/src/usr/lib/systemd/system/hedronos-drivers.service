@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS graphics driver convergence
+Documentation=file:/usr/share/doc/hedronos-drivers/README.md
+# Runs once per boot, after the initramfs hook has already loaded the KMS driver.
+# It re-plans, and only touches the system when reality diverged from the plan
+# (new GPU, kernel replaced under a DKMS module, user disabled a unit by hand).
+After=systemd-udev-settle.service systemd-modules-load.service
+Wants=systemd-udev-settle.service
+ConditionPathExists=!/etc/hedron/disable
+ConditionPathExists=!/run/hedron/skip-drivers
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/hedron/driverd.py --once --converge
+RemainAfterExit=no
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+# Only needs to read sysfs and write under /etc + /var/lib/hedron.
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=no
+MemoryMax=384M
+TasksMax=32
+StandardOutput=journal+console
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

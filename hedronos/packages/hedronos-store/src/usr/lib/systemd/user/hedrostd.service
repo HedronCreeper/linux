@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=HedronOS store transaction daemon
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+After=network-online.target flatpak-system-helper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/hedron/hedrostd.py --serve
+Restart=on-failure
+RestartSec=4
+# Exits when idle so the socket can wake it; 0 keeps it resident.
+Environment=HEDRON_STORE_IDLE_EXIT=300
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/hedron /etc/pacman.d
+# It must run pacman/flatpak/yay as the user, so this is NOT a sandboxed service — the
+# capability check is that it may not gain privileges it does not already have.
+KeyringMode=shared
+
+[Install]
+WantedBy=default.target

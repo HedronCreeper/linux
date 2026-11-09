@@ -1,0 +1,45 @@
+# hedronos-gamemode — per-process game claims. SPDX-License-Identifier: MIT
+#
+# FDO GameMode is a DBus daemon that sets a handful of sysctls. Ours is a 900-byte Unix
+# socket protocol plus a C client, because we needed three things the original cannot give
+# us: claims that survive the game crashing, a claim *before* the first frame, and a hook
+# that also engages FlowState + the replay buffer in the same transaction.
+[package]
+name = "hedronos-gamemode"
+version = "1.0.0"
+release = "1"
+summary = "Game claims: per-process tuning, cgroup placement and reaper, with a Steam launch hook"
+url = "https://github.com/HedronCreeper/linux/tree/master/hedronos"
+license = ["MIT"]
+arch = ["x86_64", "aarch64"]
+groups = ["hedronos", "hedronos-gaming"]
+
+[depends]
+runtime = ["systemd-libs", "glibc"]
+build = ["make", "gcc", "pkgconf"]
+check = ["python"]
+optional = ["steam", "gamescope"]
+
+[provides]
+packages = ["gamemode"]
+
+[conflicts]
+packages = ["gamemode", "gamemoderun", "libgamemode"]
+
+[build]
+command = "make @JOBS@"
+
+[install]
+tree = "src"
+
+[install.modes]
+"usr/bin/hgm" = "0755"
+"usr/bin/hedron-run" = "0755"
+"usr/bin/gamemoderun" = "0755"
+"usr/lib/systemd/user/hedron-gamemoded.service" = "0644"
+"etc/hedron/gamemode.conf" = "0644"
+
+[services]
+
+[tests]
+modules = ["tests/test_gamemode_protocol.py"]

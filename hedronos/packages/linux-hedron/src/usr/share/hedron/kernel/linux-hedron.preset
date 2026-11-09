@@ -1,0 +1,16 @@
+# mkinitcpio preset for the HedronOS kernel.  SPDX-License-Identifier: MIT
+# The hook list is the upstream Arch one plus hedron-early first (so the splash is on the right
+# console) and the fsck hook only where the filesystem actually needs it.
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/boot/vmlinuz-linux-hedron"
+
+PRESETS=('default' 'fallback')
+
+# The HedronOS kernel is built with the hooks below; /etc/mkinitcpio.conf may extend them.
+default_config="/etc/mkinitcpio.conf"
+default_image="/boot/initramfs-linux-hedron.img"
+default_options=""
+
+fallback_config="/etc/mkinitcpio.conf"
+fallback_image="/boot/initramfs-linux-hedron-fallback.img"
+fallback_options="-S autodetect"

@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+"""hedron-handheld — power, TDP and mode switching for Deck-like machines.
+
+A handheld is a laptop that you play with: battery is measured in frames-per-minute, and the
+difference between 9 W and 15 W is the difference between "two hours" and "three and a half".
+This tool exists so that tradeoff is one command, and so the mode is *recorded* (in
+/etc/hedron/handheld-mode) instead of living in whatever slider app you opened last.
+
+Only sysfs knobs that the running kernel actually exports are touched; a missing knob is
+reported as "not on this platform" rather than silently half-applied:
+
+  /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw   Intel/AMD RAPL package cap
+  /sys/devices/system/cpu/cpufreq/boost                          global turbo switch
+  /sys/devices/system/cpu/amd_pstate/status                       guided/auto/active
+  /sys/devices/platform/amd_pmf.0/cnqf_enable                     AMD silent mode
+  /sys/class/backlight/*/brightness                               panel brightness (0-100 %)
+  /sys/class/power_supply/*/charge_control_end_threshold          charge ceiling (firmware-
+                                                                  dependent; many vendors need
+                                                                  acpi_call, so we just tell you)
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _cand in ("/usr/lib/python3.13/site-packages",):
+    if os.path.isdir(os.path.join(_cand, "hedronlib")):
+        sys.path.insert(0, os.path.abspath(_cand))
+        break
+_d = _HERE
+for _ in range(9):
+    _d = os.path.dirname(_d)
+    if os.path.isdir(os.path.join(_d, "tools", "hedronlib")):
+        sys.path.insert(0, os.path.join(_d, "tools"))
+        break
+_hh = os.path.join(_HERE, "..", "..", "lib", "hedron", "handheld")
+if os.path.isdir(os.path.abspath(_hh)):
+    sys.path.insert(0, os.path.abspath(_hh))
+
+from hedronlib.util import parse_keyvalue, run  # noqa: E402
+
+def _find(system_path: str, env: str | None = None) -> str:
+    """Installed path first, then the checkout (so `make test` works uninstalled)."""
+    for cand in (os.environ.get(env) if env else None, system_path):
+        if cand and os.path.exists(cand):
+            return cand
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(9):
+        d = os.path.dirname(d)
+        for rel in ("hedronos/packages/hedronos-handheld/src/usr/lib/hedron/handheld/modes.toml",
+                    "packages/hedronos-handheld/src/usr/lib/hedron/handheld/modes.toml",
+                    "usr/lib/hedron/handheld/modes.toml"):
+            cand = os.path.join(d, rel)
+            if os.path.exists(cand):
+                return cand
+        if os.path.isdir(os.path.join(d, ".git")):
+            break
+    return system_path
+
+
+MODES = _find("/usr/lib/hedron/handheld/modes.toml", "HEDRON_HANDHELD_MODES")
+STATE = os.environ.get("HEDRON_HANDHELD_STATE", "/etc/hedron/handheld-mode")
+RAPL_ZONE = "/sys/class/powercap/intel-rapl:0"
+BOOST = "/sys/devices/system/cpu/cpufreq/boost"
+AMD_PSTATE = "/sys/devices/system/cpu/amd_pstate/status"
+PMF_SILENT = "/sys/devices/platform/amd_pmf.0/cnqf_enable"
+CHARGE_END = "/sys/class/power_supply/{ps}/charge_control_end_threshold"
+# Overridable so `make test` (and a chroot with no panel) can point at a fake sysfs tree.
+BACKLIGHT_GLOB = os.environ.get("HEDRON_BACKLIGHT_GLOB", "/sys/class/backlight/*/brightness")
+
+
+def exists(path: str) -> bool:
+    return os.path.exists(path)
+
+
+def read(path: str, default: str = "") -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def write(path: str, value: str, *, dry: bool) -> tuple[bool, str]:
+    """Write one sysfs knob. Returns (applied, note) — the note is the point of the whole tool."""
+    if not exists(path):
+        return False, "not exposed by this kernel/firmware"
+    if dry:
+        return True, "would write %s → %s" % (path, value)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(value + "\n")
+    except PermissionError:
+        return False, "needs root (write to %s)" % path
+    except OSError as exc:
+        return False, "%s rejected %r (%s)" % (path, value, exc.strerror or exc)
+    return True, "wrote %s" % path
+
+
+def load_modes() -> dict:
+    doc = {}
+    if not os.path.isfile(MODES):
+        return doc
+    text = open(MODES, encoding="utf-8").read()
+    import tomllib
+
+    try:
+        raw = tomllib.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        print("hedron-handheld: cannot parse %s: %s" % (MODES, exc), file=sys.stderr)
+        return doc
+    return raw.get("modes", {})
+
+
+def current_mode() -> str:
+    return read(STATE, "unknown")
+
+
+def battery() -> dict:
+    out = {"percent": None, "watts": None, "status": "unknown"}
+    for ps in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+        full = read(os.path.join(ps, "charge_full")) or read(os.path.join(ps, "energy_full"))
+        now = read(os.path.join(ps, "charge_now")) or read(os.path.join(ps, "energy_now"))
+        if full and now:
+            try:
+                out["percent"] = round(100.0 * int(now) / int(full), 1)
+            except ZeroDivisionError:
+                pass
+        out["status"] = read(os.path.join(ps, "status"), "unknown")
+        volts = read(os.path.join(ps, "voltage_now")) or "0"
+        amps = read(os.path.join(ps, "current_now")) or "0"
+        try:
+            out["watts"] = round(int(volts) * int(amps) / 1e12, 2)
+        except ValueError:
+            pass
+        break
+    return out
+
+
+def package_power() -> dict:
+    out = {"zone": None, "limit_w": None, "power_w": None}
+    if not os.path.isdir(RAPL_ZONE):
+        return out
+    out["zone"] = read(os.path.join(RAPL_ZONE, "name"), "intel-rapl:0")
+    limit = read(os.path.join(RAPL_ZONE, "constraint_0_power_limit_uw"))
+    power = read(os.path.join(RAPL_ZONE, "power_uw"))
+    try:
+        out["limit_w"] = round(int(limit) / 1e6, 1) if limit else None
+        out["power_w"] = round(int(power) / 1e6, 1) if power else None
+    except ValueError:
+        pass
+    return out
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    modes = load_modes()
+    doc = {"mode": current_mode(),
+            "mode_title": (modes.get(current_mode(), {}) or {}).get("title", ""),
+            "battery": battery(),
+            "package": package_power(),
+            "turbo": read(BOOST, "n/a") or "n/a",
+            "amd_pstate": read(AMD_PSTATE, "absent"),
+            "amd_pmf_silent": read(PMF_SILENT, "absent"),
+            "governors": sorted({read(p, "?") for p in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor")})[:4],
+            "backlight": [os.path.basename(p) for p in glob.glob("/sys/class/backlight/*")],
+            "accelerometer": [os.path.basename(p) for p in glob.glob("/sys/bus/iio/devices/iio:device*")]}
+    if args.json:
+        print(json.dumps(doc, indent=1, sort_keys=True))
+        return 0
+    print("mode        %s  %s" % (doc["mode"], ("— " + doc["mode_title"]) if doc["mode_title"] else ""))
+    print("battery     %s%%  %s W draw  (%s)" % (doc["battery"]["percent"], doc["battery"]["watts"],
+                                                 doc["battery"]["status"]))
+    print("package     %s  cap %s W  now %s W" % (doc["package"]["zone"], doc["package"]["limit_w"],
+                                                  doc["package"]["power_w"]))
+    print("turbo       %s   amd_pstate %s   pmf-silent %s" % (doc["turbo"], doc["amd_pstate"],
+                                                              doc["amd_pmf_silent"]))
+    print("governors   %s" % ", ".join(doc["governors"]))
+    print("inputs      backlight: %s · iio: %s" % (", ".join(doc["backlight"]) or "none",
+                                                    ", ".join(doc["accelerometer"]) or "none"))
+    return 0
+
+
+def cmd_modes(args: argparse.Namespace) -> int:
+    modes = load_modes()
+    for name, cfg in sorted(modes.items()):
+        marker = "*" if name == current_mode() else " "
+        print("%s %-12s %-38s %s" % (marker, name, cfg.get("title", ""), cfg.get("summary", "")))
+    return 0
+
+
+def apply_mode(args: argparse.Namespace) -> int:
+    modes = load_modes()
+    cfg = modes.get(args.name)
+    if cfg is None:
+        print("unknown mode %r (have: %s)" % (args.name, ", ".join(sorted(modes))), file=sys.stderr)
+        return 2
+    print("mode → %s (%s)" % (args.name, cfg.get("title", "")))
+    steps: list[tuple[str, bool, str]] = []
+    if "tdp_w" in cfg:
+        steps.append(("package power cap", *write(RAPL_ZONE + "/constraint_0_power_limit_uw",
+                                                  str(int(float(cfg["tdp_w"]) * 1e6)), dry=args.dry_run)))
+    if "turbo" in cfg:
+        steps.append(("turbo", *write(BOOST, str(int(cfg["turbo"])), dry=args.dry_run)))
+    if "cnqf_enable" in cfg:
+        steps.append(("AMD PMF silent", *write(PMF_SILENT, str(int(cfg["cnqf_enable"])), dry=args.dry_run)))
+    if "amd_pstate" in cfg:
+        steps.append(("amd_pstate mode", *write(AMD_PSTATE, str(cfg["amd_pstate"]), dry=args.dry_run)))
+    if "cpu_governor" in cfg:
+        n = 0
+        for path in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+            ok, _note = write(path, str(cfg["cpu_governor"]), dry=args.dry_run)
+            n += 1 if ok else 0
+        steps.append(("scaling_governor on %d cpu(s)" % n, n > 0,
+                      "" if n else "no cpufreq sysfs (guest or a governor-only driver)"))
+    if "brightness" in cfg:
+        for path in glob.glob(BACKLIGHT_GLOB):
+            maximum = read(os.path.dirname(path) + "/max_brightness")
+            try:
+                value = str(max(1, int(int(maximum) * float(cfg["brightness"]) / 100)))
+            except ValueError:
+                continue
+            steps.append(("brightness " + os.path.basename(os.path.dirname(path)),
+                          *write(path, value, dry=args.dry_run)))
+    if "fps_cap" in cfg and not args.dry_run:
+        subprocess.call(["sh", "-c", "mangohud --option fps_limit=%d true" % int(cfg["fps_cap"])])
+    for extra in ([cfg["sched_profile"]] if "sched_profile" in cfg else []):
+        cmd = ["hedron-tune", "apply", "--profile", extra]
+        print("  $ " + " ".join(cmd))
+        if not args.dry_run:
+            subprocess.call(cmd)
+    if "extra_cmd" in cfg:
+        cmd = cfg["extra_cmd"].split()
+        print("  $ " + " ".join(cmd))
+        if not args.dry_run:
+            subprocess.call(cmd)
+    applied = sum(1 for _l, ok, _n in steps if ok)
+    for label, ok, note in steps:
+        print("  %s %-34s %s" % ("✓" if ok else "·", label, note))
+    print("%d/%d knobs applied on this machine" % (applied, len(steps)))
+    if not args.dry_run:
+        try:
+            os.makedirs(os.path.dirname(STATE), exist_ok=True)
+            with open(STATE, "w", encoding="utf-8") as fh:
+                fh.write(args.name + "\n")
+        except OSError as exc:
+            print("  ! could not record the mode in %s: %s" % (STATE, exc))
+    return 0 if applied else 1
+
+
+def cmd_tdp(args: argparse.Namespace) -> int:
+    zone = RAPL_ZONE
+    path = zone + "/constraint_0_power_limit_uw"
+    if args.watts is None:
+        print("%s W" % (round(int(read(path, "0")) / 1e6, 1) if exists(path) else "unavailable"))
+        return 0
+    if args.watts < 3 or args.watts > 250:
+        print("3–250 W is the range I will write; %s is outside it" % args.watts, file=sys.stderr)
+        return 2
+    ok, note = write(path, str(int(args.watts * 1e6)), dry=args.dry_run)
+    print("TDP %s W: %s" % (args.watts, note))
+    if not ok and not exists(path):
+        print("  no RAPL zone here. On AMD without powercap, try `corectrl` (it speaks to SMU) —\n"
+              "  hedron-handheld refuses to invent a sysfs path that does not exist.")
+    return 0 if ok else 1
+
+
+def cmd_boost(args: argparse.Namespace) -> int:
+    if args.value is None:
+        print("turbo: %s" % (read(BOOST, "n/a") or "n/a"))
+        return 0
+    ok, note = write(BOOST, "1" if args.value in ("on", "1", "true") else "0", dry=args.dry_run)
+    print("turbo %s: %s" % (args.value, note))
+    return 0 if ok else 1
+
+
+def cmd_brightness(args: argparse.Namespace) -> int:
+    """`brightness 60` sets 60 %%; `brightness +5` / `-5` step relative to the current level.
+
+    The keyboard keys use the relative form because a fixed value fights whatever the user last
+    set with the slider, and a desktop shortcut that resets your brightness is a shortcut people
+    turn off within a day.
+    """
+    paths = sorted(glob.glob(BACKLIGHT_GLOB))
+    if not paths:
+        print("no /sys/class/backlight device (headless?)", file=sys.stderr)
+        return 1
+    for path in paths:
+        maximum = read(os.path.dirname(path) + "/max_brightness") or "0"
+        if args.percent is None:
+            print("%s: %s / %s" % (os.path.basename(os.path.dirname(path)), read(path), maximum))
+            continue
+        relative = args.percent[0] in "+-"
+        try:
+            step = int(args.percent)
+            cur = int(read(path) or "0")
+            mx = int(maximum or "0")
+        except ValueError:
+            print("%s: cannot read the current level or max_brightness" % path, file=sys.stderr)
+            continue
+        if relative:
+            if mx <= 0:
+                print("%s: max_brightness is unreadable, refusing to guess" % path, file=sys.stderr)
+                continue
+            want = max(1, min(100, round(100.0 * cur / mx) + step))
+        else:
+            want = max(1, min(100, step))
+        try:
+            value = str(max(1, int(int(maximum) * want / 100)))
+        except ValueError:
+            print("%s: max_brightness unreadable" % path, file=sys.stderr)
+            continue
+        ok, note = write(path, value, dry=args.dry_run)
+        print("%s → %s%% (%s): %s" % (os.path.basename(os.path.dirname(path)), want, value, note))
+    return 0
+
+
+def cmd_charge_limit(args: argparse.Namespace) -> int:
+    found = False
+    for ps in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+        path = CHARGE_END.format(ps=os.path.basename(ps))
+        if not exists(path):
+            continue
+        found = True
+        if args.percent is None:
+            print("%s: %s%%" % (os.path.basename(ps), read(path)))
+            continue
+        ok, note = write(path, str(int(args.percent)), dry=args.dry_run)
+        print("%s charge ceiling → %s%%: %s" % (os.path.basename(ps), args.percent, note))
+    if not found:
+        print("this firmware exposes no charge_control_end_threshold. A handheld that lives on a\n"
+              "desk still wants a ceiling: see the vendor quirk list in\n"
+              "/usr/share/hedron/handheld/README.md#charge-thresholds.")
+        return 1
+    return 0
+
+
+def cmd_session(args: argparse.Namespace) -> int:
+    cmd = ["/usr/bin/hedron-deck-session"]
+    if args.dry_run:
+        print("would exec: " + " ".join(cmd))
+        return 0
+    os.execv(cmd[0], cmd)
+
+
+def cmd_lock_buttons(args: argparse.Namespace) -> int:
+    """Ignore the controller buttons that should not do things on the desktop."""
+    path = "/etc/hedron/handheld-buttons.lock"
+    if args.value == "off":
+        if exists(path) and not args.dry_run:
+            os.unlink(path)
+        print("unlocked")
+        return 0
+    if not args.dry_run:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("QAM,guide,keys->ignore-outside-gaming\n")
+    print("button lock %s (%s)" % (args.value, path))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="hedron-handheld", description=__doc__.splitlines()[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="current mode + what the hardware actually exposes").set_defaults(func=cmd_status)
+    sub.add_parser("modes", help="list modes").set_defaults(func=cmd_modes)
+    p = sub.add_parser("mode", help="apply a mode")
+    p.add_argument("name")
+    p.set_defaults(func=apply_mode)
+    p = sub.add_parser("tdp", help="read or set the package power cap")
+    p.add_argument("watts", nargs="?", type=float)
+    p.set_defaults(func=cmd_tdp)
+    p = sub.add_parser("boost", help="turbo on/off")
+    p.add_argument("value", choices=["on", "off"])
+    p.set_defaults(func=cmd_boost)
+    p = sub.add_parser("brightness", help="panel brightness: 60 sets 60 %%; +5/-5 step")
+    p.add_argument("percent", nargs="?", default=None)
+    p.set_defaults(func=cmd_brightness)
+    p = sub.add_parser("charge-limit", help="battery charge ceiling (firmware permitting)")
+    p.add_argument("percent", nargs="?", type=int)
+    p.set_defaults(func=cmd_charge_limit)
+    sub.add_parser("session", help="launch the gamescope handheld session").set_defaults(func=cmd_session)
+    p = sub.add_parser("lock-buttons", help="ignore the guide/QAM buttons outside games")
+    p.add_argument("value", choices=["on", "off"])
+    p.set_defaults(func=cmd_lock_buttons)
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

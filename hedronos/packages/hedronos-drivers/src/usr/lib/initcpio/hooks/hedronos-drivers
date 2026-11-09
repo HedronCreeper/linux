@@ -1,0 +1,48 @@
+#!/usr/bin/bash
+# HedronOS initcpio hook: make sure the GPU's own driver is available *before* the
+# root is mounted, so the splash, the console and (critically) a Wayland session all
+# come up on the real KMS driver on first boot — including on a machine the image has
+# never seen, and including when the vendor module lives in /usr/lib/modules.
+#
+# The build-time plan (etc/hedron/gpu-plans.json) is not available here, so we do the
+# cheap, robust thing: read the PCI ids from sysfs, and add the matching modules.
+# shellcheck disable=SC2034,SC2039,SC3043  # sourced by mkinitcpio's bash runner
+
+run_hook() {
+	# Extremely defensive: a hook that fails must never block a boot.
+	[ -r /sys/bus/pci/devices/0000:00:02.0/vendor ] || return 0
+	local added=""
+	for dev in /sys/bus/pci/devices/*; do
+		[ -r "$dev/class" ] || continue
+		class=$(cat "$dev/class" 2>/dev/null)
+		case "$class" in
+		0x0300* | 0x0302* | 0x0380*) ;;
+		*) continue ;;
+		esac
+		vendor=$(cat "$dev/vendor" 2>/dev/null)
+		device=$(cat "$dev/device" 2>/dev/null)
+		[ -n "$vendor" ] || continue
+		mod=""
+		case "$vendor" in
+		0x10de)
+			# Turing+ (0x1e80..) uses the vendor module when installed; nouveau otherwise.
+			mod="nouveau"
+			case "$device" in
+			0x1e[89a-f]* | 0x1f* | 0x2[0-9a-f]*) mod="nvidia" ;;
+			esac
+			;;
+		0x1002) mod="amdgpu" ;;
+		0x8086) mod="i915" ;;
+		0x15ad) mod="vmwgfx" ;;
+		0x1af4) mod="virtio_gpu" ;;
+		esac
+		[ -n "$mod" ] || continue
+		case " $added " in
+		*" $mod "*) continue ;;
+		esac
+		modprobe "$mod" 2>/dev/null && added="$added $mod"
+	done
+	[ -n "$added" ] || return 0
+	echo "hedronos-drivers: loaded$added"
+	return 0
+}

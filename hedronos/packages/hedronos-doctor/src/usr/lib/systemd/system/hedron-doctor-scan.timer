@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Weekly HedronOS health scan
+Documentation=https://github.com/HedronCreeper/linux/tree/master/hedronos
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=6h
+Persistent=true
+# A Sunday-4am scan with a 6 h jitter: it never lands on the same minute for two machines in the
+# same household, and Persistent=true means a machine that was off catches up on next boot.
+Unit=hedron-doctor-scan.service
+
+[Install]
+WantedBy=timers.target

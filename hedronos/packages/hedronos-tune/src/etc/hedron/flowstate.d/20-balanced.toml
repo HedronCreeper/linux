@@ -1,0 +1,31 @@
+# FlowState: balanced — the everyday desktop profile.  SPDX-License-Identifier: MIT
+[profile]
+name = "balanced"
+inherits = "base"
+note = "Battery-aware on laptops, quiet on desktops, no latency heroics."
+
+[cpu]
+governor = "schedutil"
+energy_performance_preference = "balance_performance"
+boost = true
+
+[sysctl]
+"vm.dirty_ratio" = 15
+"vm.dirty_background_ratio" = 3
+"net.core.busy_poll" = 0
+"net.core.busy_read" = 0
+"vm.watermark_scale_factor" = 125
+
+[sysfs]
+"sys/kernel/mm/transparent_hugepage/enabled" = "madvise"
+"sys/devices/system/cpu/cpu*/cpuidle/state2/disable" = "0"
+"sys/devices/system/cpu/cpu*/cpuidle/state3/disable" = "0"
+
+[gpu]
+power_profile = "auto"
+
+[sched]
+scheduler = "none"
+
+[extra]
+no-thundering-herd = "echo 'keep deep C-states enabled; the compositor wins them back fast enough'"

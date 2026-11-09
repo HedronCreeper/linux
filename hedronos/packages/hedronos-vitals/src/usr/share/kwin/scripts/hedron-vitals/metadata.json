@@ -1,0 +1,14 @@
+{
+  "SPDX-License-Identifier": "MIT",
+  "KPackageStructure": "KWin/Script",
+  "Id": "hedron-vitals",
+  "Name": "HedronOS Vitals overlay",
+  "Comment": "Frame time, GPU/CPU temperature and pressure HUD fed by hedron-vitalsd",
+  "Icon": "hardware-monitor",
+  "Website": "https://github.com/HedronCreeper/linux/tree/master/hedronos",
+  "Email": "build@hedronos.local",
+  "License": "MIT",
+  "Version": "1.0.0",
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "Main": "main.js"
+}

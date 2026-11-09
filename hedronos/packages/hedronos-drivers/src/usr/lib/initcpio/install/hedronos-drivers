@@ -1,0 +1,39 @@
+#!/usr/bin/bash
+# mkinitcpio build-time installer for the hedronos-drivers hook.
+# SPDX-License-Identifier: MIT
+# shellcheck disable=SC2034,SC2039,SC2086,SC2154  # sourced by mkinitcpio with its own vars
+
+build() {
+	add_module nvidia nvidia_modeset nvidia_uvm nvidia_drm
+	add_module amdgpu
+	add_module i915
+	add_module xe
+	add_module nouveau
+	add_module radeon
+	add_module vmwgfx
+	add_module virtio_gpu
+	add_module simpledrm
+	add_module drm_kms_helper
+	add_module drm
+
+	add_binary hedron-gpu-detect
+	add_binary modprobe
+	add_binary cat
+
+	add_file /etc/hedron/gpu-plans.json
+	add_file /etc/hedron/gpu-db.json
+	add_file /etc/modprobe.d/99-hedron-nvidia.conf
+	add_file /etc/modprobe.d/99-hedron-amdgpu.conf
+	add_file /etc/modprobe.d/99-hedron-i915.conf
+
+	add_runhook hedronos-drivers
+	add_checked_modules
+}
+
+help() {
+	sed -rn 's/^##?//p' "$0" 2>/dev/null || cat <<'EOF'
+hedronos-drivers: load the right GPU driver in the initramfs on the actual target
+machine, so first boot works offline and the splash never falls back to a
+llvmpipe/framebuffer console.
+EOF
+}
